@@ -163,9 +163,11 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
         exitSelection()
     }
 
-    fun playSingleAudio(item: SavedMedia) {
+    /** Plays [queue] starting at [startIndex] — used for both "tap a track" (rest of the
+     *  currently visible list becomes the queue) and explicit "Play All". */
+    fun playAudioQueue(queue: List<SavedMedia>, startIndex: Int, loopAll: Boolean) {
         viewModelScope.launch {
-            PlayerController.playQueue(getApplication(), listOf(item), loopAll = false)
+            PlayerController.playQueue(getApplication(), queue, loopAll, startIndex)
         }
     }
 

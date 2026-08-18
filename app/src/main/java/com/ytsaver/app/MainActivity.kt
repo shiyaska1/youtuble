@@ -138,7 +138,7 @@ private fun AppRoot() {
     }
 
     val navController = rememberNavController()
-    var openVideo by remember { mutableStateOf<SavedMedia?>(null) }
+    var videoRequest by remember { mutableStateOf<VideoQueueRequest?>(null) }
     var bannerVisible by remember { mutableStateOf(true) }
     val isInPip by PipState.isInPip.collectAsState()
 
@@ -150,18 +150,19 @@ private fun AppRoot() {
             NavHost(navController, startDestination = "main") {
                 composable("main") {
                     MainScaffold(
-                        onOpenVideo = { video ->
-                            openVideo = video
+                        onOpenVideo = { queue, startIndex, loop ->
+                            videoRequest = VideoQueueRequest(queue, startIndex, loop)
                             navController.navigate("player")
                         }
                     )
                 }
                 composable("player") {
-                    val video = openVideo
-                    if (video != null) {
+                    val request = videoRequest
+                    if (request != null) {
                         PlayerScreen(
-                            filePath = video.filePath,
-                            caption = video.caption,
+                            queue = request.queue,
+                            startIndex = request.startIndex,
+                            initialLoop = request.loop,
                             onBack = { navController.popBackStack() },
                             onFullscreenChange = { fullscreen -> bannerVisible = !fullscreen }
                         )
@@ -172,8 +173,10 @@ private fun AppRoot() {
     }
 }
 
+private data class VideoQueueRequest(val queue: List<SavedMedia>, val startIndex: Int, val loop: Boolean)
+
 @Composable
-private fun MainScaffold(onOpenVideo: (SavedMedia) -> Unit) {
+private fun MainScaffold(onOpenVideo: (List<SavedMedia>, Int, Boolean) -> Unit) {
     var selectedTab by remember { mutableStateOf(0) }
 
     Scaffold(

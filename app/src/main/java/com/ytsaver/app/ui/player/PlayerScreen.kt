@@ -18,6 +18,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Repeat
+import androidx.compose.material.icons.filled.RepeatOne
 import android.util.Rational
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -35,18 +37,21 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import com.ytsaver.app.data.MediaAccess
+import com.ytsaver.app.data.SavedMedia
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PlayerScreen(
-    filePath: String,
-    caption: String,
+    queue: List<SavedMedia>,
+    startIndex: Int,
+    initialLoop: Boolean,
     onBack: () -> Unit,
     onFullscreenChange: (Boolean) -> Unit = {}
 ) {
@@ -55,10 +60,13 @@ fun PlayerScreen(
     var isFullscreen by remember { mutableStateOf(false) }
     val isInPip by PipState.isInPip.collectAsState()
     var playbackError by remember { mutableStateOf<String?>(null) }
+    var loopEnabled by remember { mutableStateOf(initialLoop) }
+    var currentTitle by remember { mutableStateOf(queue.getOrNull(startIndex)?.caption.orEmpty()) }
 
     val exoPlayer = remember {
         ExoPlayer.Builder(context).build().apply {
-            setMediaItem(MediaItem.fromUri(MediaAccess.playableUriString(filePath)))
+            setMediaItems(queue.map { it.toMediaItem() }, startIndex.coerceIn(0, (queue.size - 1).coerceAtLeast(0)), 0)
+            repeatMode = if (initialLoop) Player.REPEAT_MODE_ALL else Player.REPEAT_MODE_OFF
             playWhenReady = true
             prepare()
             addListener(object : Player.Listener {
@@ -68,6 +76,10 @@ fun PlayerScreen(
                         val ratio = (videoSize.width.toFloat() / videoSize.height).coerceIn(1f / 2.39f, 2.39f)
                         PipState.aspectRatio = Rational((ratio * 1000).toInt(), 1000)
                     }
+                }
+
+                override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                    currentTitle = mediaItem?.mediaMetadata?.title?.toString().orEmpty()
                 }
 
                 override fun onPlayerError(error: PlaybackException) {
@@ -104,6 +116,11 @@ fun PlayerScreen(
         }
     }
 
+    fun toggleLoop() {
+        loopEnabled = !loopEnabled
+        exoPlayer.repeatMode = if (loopEnabled) Player.REPEAT_MODE_ALL else Player.REPEAT_MODE_OFF
+    }
+
     DisposableEffect(Unit) {
         activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         onDispose {
@@ -118,10 +135,21 @@ fun PlayerScreen(
         topBar = {
             if (!isFullscreen && !isInPip) {
                 TopAppBar(
-                    title = { Text(caption, maxLines = 1) },
+                    title = { Text(currentTitle, maxLines = 1) },
                     navigationIcon = {
                         IconButton(onClick = onBack) {
                             Icon(Icons.Default.ArrowBack, contentDescription = "Back")
+                        }
+                    },
+                    actions = {
+                        if (queue.size > 1) {
+                            IconButton(onClick = { toggleLoop() }) {
+                                Icon(
+                                    if (loopEnabled) Icons.Default.RepeatOne else Icons.Default.Repeat,
+                                    contentDescription = if (loopEnabled) "Loop on" else "Loop off",
+                                    tint = if (loopEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                )
+                            }
                         }
                     }
                 )
@@ -155,6 +183,13 @@ fun PlayerScreen(
         }
     }
 }
+
+private fun SavedMedia.toMediaItem(): MediaItem =
+    MediaItem.Builder()
+        .setMediaId(id.toString())
+        .setUri(MediaAccess.playableUriString(filePath))
+        .setMediaMetadata(MediaMetadata.Builder().setTitle(caption).build())
+        .build()
 
 private fun Context.findActivity(): Activity? {
     var ctx = this

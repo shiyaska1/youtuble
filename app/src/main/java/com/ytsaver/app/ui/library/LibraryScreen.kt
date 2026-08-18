@@ -94,7 +94,7 @@ private val MIN_AGE_OPTIONS = listOf(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LibraryScreen(
-    onOpenVideo: (SavedMedia) -> Unit,
+    onOpenVideo: (queue: List<SavedMedia>, startIndex: Int, loop: Boolean) -> Unit,
     viewModel: LibraryViewModel = viewModel()
 ) {
     val state by viewModel.uiState.collectAsState()
@@ -277,6 +277,19 @@ fun LibraryScreen(
                 )
             }
 
+            if (state.category != CategoryFilter.ALL && state.items.isNotEmpty()) {
+                PlayAllRow(
+                    isVideo = state.category == CategoryFilter.VIDEO,
+                    onPlayAll = { loop ->
+                        if (state.category == CategoryFilter.VIDEO) {
+                            onOpenVideo(state.items, 0, loop)
+                        } else {
+                            viewModel.playAudioQueue(state.items, 0, loop)
+                        }
+                    }
+                )
+            }
+
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -333,12 +346,22 @@ fun LibraryScreen(
             }
 
             if (state.selectionMode) {
+                val selectedItems = state.items.filter { it.id in state.selectedIds }
+                val allVideo = selectedItems.isNotEmpty() && selectedItems.all { it.type == MediaType.VIDEO }
+                val allAudio = selectedItems.isNotEmpty() && selectedItems.all { it.type == MediaType.AUDIO }
                 SelectionBar(
                     selectedCount = state.selectedIds.size,
-                    allAudio = state.items.filter { it.id in state.selectedIds }.all { it.type == MediaType.AUDIO },
+                    canPlay = allVideo || allAudio,
                     onCancel = viewModel::exitSelection,
                     onSelectAll = viewModel::selectAllVisible,
-                    onPlay = { loop -> viewModel.playSelected(loop) },
+                    onPlay = { loop ->
+                        if (allVideo) {
+                            onOpenVideo(selectedItems, 0, loop)
+                            viewModel.exitSelection()
+                        } else {
+                            viewModel.playSelected(loop)
+                        }
+                    },
                     onDelete = { pendingBulkDelete = true },
                     onMove = { pendingMoveSelection = true }
                 )
@@ -355,8 +378,14 @@ fun LibraryScreen(
                             onClick = {
                                 when {
                                     state.selectionMode -> viewModel.toggleSelected(item.id)
-                                    item.type == MediaType.VIDEO -> onOpenVideo(item)
-                                    else -> viewModel.playSingleAudio(item)
+                                    item.type == MediaType.VIDEO -> {
+                                        val sameType = state.items.filter { it.type == MediaType.VIDEO }
+                                        onOpenVideo(sameType, sameType.indexOf(item).coerceAtLeast(0), false)
+                                    }
+                                    else -> {
+                                        val sameType = state.items.filter { it.type == MediaType.AUDIO }
+                                        viewModel.playAudioQueue(sameType, sameType.indexOf(item).coerceAtLeast(0), false)
+                                    }
                                 }
                             },
                             onLongClick = { viewModel.enterSelection(item.id) },
@@ -462,7 +491,7 @@ private fun MoveToCategoryDialog(
 @Composable
 private fun SelectionBar(
     selectedCount: Int,
-    allAudio: Boolean,
+    canPlay: Boolean,
     onCancel: () -> Unit,
     onSelectAll: () -> Unit,
     onPlay: (loop: Boolean) -> Unit,
@@ -480,7 +509,7 @@ private fun SelectionBar(
     ) {
         Text("$selectedCount selected", modifier = Modifier.padding(end = 8.dp))
         TextButton(onClick = onSelectAll) { Text("Select all") }
-        if (allAudio) {
+        if (canPlay) {
             Text("Loop", modifier = Modifier.padding(start = 8.dp, end = 4.dp))
             Switch(checked = loop, onCheckedChange = { loop = it })
             TextButton(onClick = { onPlay(loop) }) { Text("Play") }
@@ -488,6 +517,24 @@ private fun SelectionBar(
         TextButton(onClick = onMove) { Text("Move") }
         TextButton(onClick = onDelete) { Text("Delete") }
         TextButton(onClick = onCancel) { Text("Cancel") }
+    }
+}
+
+@Composable
+private fun PlayAllRow(isVideo: Boolean, onPlayAll: (loop: Boolean) -> Unit) {
+    var loop by remember { mutableStateOf(false) }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        TextButton(onClick = { onPlayAll(loop) }) {
+            Icon(Icons.Default.PlayArrow, contentDescription = null)
+            Text(if (isVideo) "Play all videos" else "Play all audio")
+        }
+        Text("Loop", modifier = Modifier.padding(start = 8.dp, end = 4.dp))
+        Switch(checked = loop, onCheckedChange = { loop = it })
     }
 }
 
