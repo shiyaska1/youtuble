@@ -1,12 +1,22 @@
 package com.ytsaver.app.license
 
+import android.annotation.SuppressLint
 import android.content.Context
+import android.provider.Settings
 import java.util.concurrent.TimeUnit
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
 
 /**
  * Local trial gate: the app works freely for [TRIAL_DURATION_MILLIS] after the
- * first launch, then requires an unlock key to keep going. State is stored in
- * SharedPreferences so it survives process death but resets on reinstall.
+ * first launch, then requires an unlock key to keep going. The key is bound
+ * to the device's Android ID via a keyed hash, so a key generated for one
+ * device won't unlock another. State is stored in SharedPreferences so it
+ * survives process death but resets on reinstall.
+ *
+ * To activate a device: read its Device ID off the lock screen, then run
+ * `tools/generate_key.py <DEVICE_ID>` (uses the same SECRET_SALT below) to
+ * get the matching key.
  */
 object LicenseManager {
     private const val PREFS_NAME = "ytsaver_license"
@@ -15,14 +25,9 @@ object LicenseManager {
 
     private val TRIAL_DURATION_MILLIS = TimeUnit.DAYS.toMillis(30)
 
-    // Any one of these unlocks the app once the trial has expired. Add or
-    // remove entries to issue different keys to different customers.
-    private val VALID_KEYS = setOf(
-        "YTSAVER-UNLOCK-2026",
-        "YTSAVER-KEY-0001",
-        "YTSAVER-KEY-0002",
-        "YTSAVER-KEY-0003"
-    )
+    // Shared secret between this app and tools/generate_key.py. Change it in
+    // both places together if you need to invalidate previously issued keys.
+    private const val SECRET_SALT = "ytsaver-secret-salt-2026"
 
     private fun prefs(context: Context) =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -47,8 +52,24 @@ object LicenseManager {
     fun requiresKey(context: Context): Boolean =
         isTrialExpired(context) && !isUnlocked(context)
 
+    @SuppressLint("HardwareIds")
+    fun deviceId(context: Context): String =
+        Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID) ?: "UNKNOWN"
+
+    /** The activation key that unlocks [deviceId], formatted as XXXX-XXXX-XXXX-XXXX. */
+    fun expectedKeyFor(deviceId: String): String {
+        val mac = Mac.getInstance("HmacSHA256")
+        mac.init(SecretKeySpec(SECRET_SALT.toByteArray(Charsets.UTF_8), "HmacSHA256"))
+        val hex = mac.doFinal(deviceId.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02X".format(it) }
+            .take(16)
+        return hex.chunked(4).joinToString("-")
+    }
+
     fun tryUnlock(context: Context, enteredKey: String): Boolean {
-        val valid = VALID_KEYS.any { it.equals(enteredKey.trim(), ignoreCase = true) }
+        val expected = expectedKeyFor(deviceId(context)).replace("-", "")
+        val entered = enteredKey.trim().replace("-", "").replace(" ", "").uppercase()
+        val valid = entered == expected
         if (valid) {
             prefs(context).edit().putBoolean(KEY_UNLOCKED, true).apply()
         }
