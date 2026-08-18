@@ -16,8 +16,10 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import android.util.Rational
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -29,6 +31,8 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
+import androidx.media3.common.VideoSize
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import com.ytsaver.app.data.MediaAccess
@@ -44,17 +48,33 @@ fun PlayerScreen(
     val context = LocalContext.current
     val activity = remember(context) { context.findActivity() }
     var isFullscreen by remember { mutableStateOf(false) }
+    val isInPip by PipState.isInPip.collectAsState()
 
     val exoPlayer = remember {
         ExoPlayer.Builder(context).build().apply {
             setMediaItem(MediaItem.fromUri(MediaAccess.playableUriString(filePath)))
             playWhenReady = true
             prepare()
+            addListener(object : Player.Listener {
+                override fun onVideoSizeChanged(videoSize: VideoSize) {
+                    if (videoSize.width > 0 && videoSize.height > 0) {
+                        // PiP requires the aspect ratio to stay within [1:2.39, 2.39:1].
+                        val ratio = (videoSize.width.toFloat() / videoSize.height).coerceIn(1f / 2.39f, 2.39f)
+                        PipState.aspectRatio = Rational((ratio * 1000).toInt(), 1000)
+                    }
+                }
+            })
         }
     }
 
     DisposableEffect(Unit) {
-        onDispose { exoPlayer.release() }
+        PipState.player = exoPlayer
+        PipState.isVideoActive.value = true
+        onDispose {
+            PipState.isVideoActive.value = false
+            PipState.player = null
+            exoPlayer.release()
+        }
     }
 
     fun setFullscreen(enabled: Boolean) {
@@ -86,7 +106,7 @@ fun PlayerScreen(
 
     Scaffold(
         topBar = {
-            if (!isFullscreen) {
+            if (!isFullscreen && !isInPip) {
                 TopAppBar(
                     title = { Text(caption, maxLines = 1) },
                     navigationIcon = {
@@ -99,7 +119,7 @@ fun PlayerScreen(
         }
     ) { padding ->
         AndroidView(
-            modifier = if (isFullscreen) Modifier.fillMaxSize() else Modifier.fillMaxSize().padding(padding),
+            modifier = if (isFullscreen || isInPip) Modifier.fillMaxSize() else Modifier.fillMaxSize().padding(padding),
             factory = { ctx ->
                 PlayerView(ctx).apply {
                     player = exoPlayer
