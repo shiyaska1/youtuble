@@ -46,6 +46,8 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.ytsaver.app.data.SavedMedia
+import com.ytsaver.app.license.LicenseGateScreen
+import com.ytsaver.app.license.LicenseManager
 import com.ytsaver.app.ui.home.HomeScreen
 import com.ytsaver.app.ui.library.LibraryScreen
 import com.ytsaver.app.ui.nav.ContactBanner
@@ -127,6 +129,13 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun AppRoot() {
     val context = LocalContext.current
+    var licensed by remember { mutableStateOf(!LicenseManager.requiresKey(context)) }
+
+    if (!licensed) {
+        LicenseGateScreen(onUnlocked = { licensed = true })
+        return
+    }
+
     val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
     val batteryOptimizationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {}
 
