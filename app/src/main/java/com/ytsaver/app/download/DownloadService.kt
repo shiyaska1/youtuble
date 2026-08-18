@@ -109,19 +109,23 @@ class DownloadService : Service() {
     private suspend fun runDownload(request: DownloadRequest) {
         val app = application as YtSaverApp
         val fileName = "${sanitizeFileName(request.caption)}.${request.fileExtension}"
-        val target: DownloadTarget = if (PublicMediaStore.isSupported()) {
-            DownloadTarget.MediaStoreUri(
-                PublicMediaStore.createPendingTarget(this, request.type, fileName, request.mimeType)
-            )
-        } else {
-            val dir = legacyMediaDir(request.type)
-            DownloadTarget.LegacyFile(uniqueFile(dir, sanitizeFileName(request.caption), request.fileExtension))
-        }
+        var target: DownloadTarget? = null
 
         try {
+            target = if (PublicMediaStore.isSupported()) {
+                DownloadTarget.MediaStoreUri(
+                    PublicMediaStore.createPendingTarget(this, request.type, fileName, request.mimeType)
+                )
+            } else {
+                val dir = legacyMediaDir(request.type)
+                DownloadTarget.LegacyFile(uniqueFile(dir, sanitizeFileName(request.caption), request.fileExtension))
+            }
+
+            val resolvedTarget = target
+
             // A small synchronous probe learns the real file size (from Content-Range)
             // before splitting the rest into chunks fetched concurrently.
-            val (totalBytes, probedBytes) = probeAndWriteFirstBytes(target, request.streamUrl)
+            val (totalBytes, probedBytes) = probeAndWriteFirstBytes(resolvedTarget, request.streamUrl)
             val bytesDone = AtomicLong(probedBytes)
             val lastNotify = AtomicLong(0)
             _progress.value = DownloadProgress(request.caption, bytesDone.get(), totalBytes)
@@ -129,7 +133,7 @@ class DownloadService : Service() {
             buildRanges(probedBytes, totalBytes, CHUNK_SIZE_BYTES).asFlow()
                 .flatMapMerge(concurrency = PARALLEL_CONNECTIONS) { range ->
                     flow {
-                        downloadRangeInto(target, request.streamUrl, range) { justRead ->
+                        downloadRangeInto(resolvedTarget, request.streamUrl, range) { justRead ->
                             val done = bytesDone.addAndGet(justRead.toLong())
                             _progress.value = DownloadProgress(request.caption, done, totalBytes)
                             val now = System.currentTimeMillis()
@@ -145,15 +149,15 @@ class DownloadService : Service() {
 
             val storedPath: String
             val sizeBytes: Long
-            when (target) {
+            when (resolvedTarget) {
                 is DownloadTarget.MediaStoreUri -> {
-                    PublicMediaStore.finalize(this, target.uri)
-                    storedPath = target.uri.toString()
+                    PublicMediaStore.finalize(this, resolvedTarget.uri)
+                    storedPath = resolvedTarget.uri.toString()
                     sizeBytes = MediaAccess.length(this, storedPath)
                 }
                 is DownloadTarget.LegacyFile -> {
-                    storedPath = target.file.absolutePath
-                    sizeBytes = target.file.length()
+                    storedPath = resolvedTarget.file.absolutePath
+                    sizeBytes = resolvedTarget.file.length()
                 }
             }
 
@@ -171,12 +175,18 @@ class DownloadService : Service() {
                 )
             )
             _progress.value = DownloadProgress(request.caption, sizeBytes, sizeBytes, done = true)
-        } catch (e: IOException) {
-            when (target) {
-                is DownloadTarget.LegacyFile -> target.file.delete()
-                is DownloadTarget.MediaStoreUri -> PublicMediaStore.abandon(this, target.uri)
+        } catch (e: Exception) {
+            // Catches cancellation too (Cancel button) so the partial file/MediaStore
+            // entry is always cleaned up and the queue always moves on to the next item.
+            when (val t = target) {
+                is DownloadTarget.LegacyFile -> t.file.delete()
+                is DownloadTarget.MediaStoreUri -> PublicMediaStore.abandon(this, t.uri)
+                null -> Unit
             }
-            _progress.value = DownloadProgress(request.caption, 0, 0, done = true, error = e.message ?: "Download failed")
+            _progress.value = DownloadProgress(
+                request.caption, 0, 0, done = true,
+                error = e.message ?: "Download failed"
+            )
         }
     }
 

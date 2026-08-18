@@ -27,13 +27,21 @@ object PublicMediaStore {
             collection = MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
             relativePath = "${Environment.DIRECTORY_MUSIC}/YTSaver"
         }
-        val values = ContentValues().apply {
+
+        fun values(mime: String) = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
-            put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
+            put(MediaStore.MediaColumns.MIME_TYPE, mime)
             put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
             put(MediaStore.MediaColumns.IS_PENDING, 1)
         }
-        return resolver.insert(collection, values)
+
+        // MediaStore's Audio/Video collections only accept a limited, OS-version-dependent
+        // whitelist of MIME types (e.g. "audio/webm" from WebM/Opus YouTube tracks is
+        // rejected on many devices) and throw IllegalArgumentException instead of failing
+        // gracefully. Retry once with a generic, always-accepted MIME type for that media kind.
+        return runCatching { resolver.insert(collection, values(mimeType)) }
+            .getOrNull()
+            ?: resolver.insert(collection, values(if (type == MediaType.VIDEO) "video/mp4" else "audio/mp4"))
             ?: error("Couldn't create \"$fileName\" in public storage")
     }
 
