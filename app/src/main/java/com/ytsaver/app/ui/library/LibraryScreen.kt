@@ -5,6 +5,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,6 +16,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CloudDownload
@@ -27,7 +29,10 @@ import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -64,6 +69,25 @@ import kotlinx.coroutines.launch
 import java.text.DateFormat
 import java.util.Date
 
+private val SORT_OPTIONS = listOf(
+    "Newest first" to SortOption.DATE_NEWEST,
+    "Oldest first" to SortOption.DATE_OLDEST,
+    "Largest first" to SortOption.SIZE_LARGEST,
+    "Smallest first" to SortOption.SIZE_SMALLEST
+)
+private val MIN_SIZE_OPTIONS = listOf(
+    "Any size" to 0L,
+    "50 MB+" to 50L * 1024 * 1024,
+    "100 MB+" to 100L * 1024 * 1024,
+    "500 MB+" to 500L * 1024 * 1024
+)
+private val MIN_AGE_OPTIONS = listOf(
+    "Any age" to 0,
+    "7+ days old" to 7,
+    "30+ days old" to 30,
+    "90+ days old" to 90
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LibraryScreen(
@@ -76,6 +100,7 @@ fun LibraryScreen(
     val context = LocalContext.current
 
     var pendingDelete by remember { mutableStateOf<SavedMedia?>(null) }
+    var pendingBulkDelete by remember { mutableStateOf(false) }
 
     val backupLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri: Uri? ->
         uri?.let {
@@ -114,6 +139,25 @@ fun LibraryScreen(
             },
             dismissButton = {
                 TextButton(onClick = { pendingDelete = null }) { Text("Cancel") }
+            }
+        )
+    }
+
+    if (pendingBulkDelete) {
+        val selected = state.items.filter { it.id in state.selectedIds }
+        val totalSize = selected.sumOf { it.sizeBytes }
+        AlertDialog(
+            onDismissRequest = { pendingBulkDelete = false },
+            title = { Text("Delete ${selected.size} file(s)?") },
+            text = { Text("This frees up ${formatSize(totalSize)} of storage. This can't be undone.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.deleteSelected()
+                    pendingBulkDelete = false
+                }) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingBulkDelete = false }) { Text("Cancel") }
             }
         )
     }
@@ -168,12 +212,38 @@ fun LibraryScreen(
                 )
             }
 
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 4.dp)
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                FilterDropdown(
+                    currentLabel = SORT_OPTIONS.first { it.second == state.sort }.first,
+                    options = SORT_OPTIONS,
+                    onSelect = viewModel::onSortChanged
+                )
+                FilterDropdown(
+                    currentLabel = MIN_SIZE_OPTIONS.first { it.second == state.minSizeBytes }.first,
+                    options = MIN_SIZE_OPTIONS,
+                    onSelect = viewModel::onMinSizeChanged
+                )
+                FilterDropdown(
+                    currentLabel = MIN_AGE_OPTIONS.first { it.second == state.minAgeDays }.first,
+                    options = MIN_AGE_OPTIONS,
+                    onSelect = viewModel::onMinAgeChanged
+                )
+            }
+
             if (state.selectionMode) {
                 SelectionBar(
                     selectedCount = state.selectedIds.size,
                     allAudio = state.items.filter { it.id in state.selectedIds }.all { it.type == MediaType.AUDIO },
                     onCancel = viewModel::exitSelection,
-                    onPlay = { loop -> viewModel.playSelected(loop) }
+                    onSelectAll = viewModel::selectAllVisible,
+                    onPlay = { loop -> viewModel.playSelected(loop) },
+                    onDelete = { pendingBulkDelete = true }
                 )
             }
 
@@ -208,24 +278,46 @@ private fun SelectionBar(
     selectedCount: Int,
     allAudio: Boolean,
     onCancel: () -> Unit,
-    onPlay: (loop: Boolean) -> Unit
+    onSelectAll: () -> Unit,
+    onPlay: (loop: Boolean) -> Unit,
+    onDelete: () -> Unit
 ) {
     var loop by remember { mutableStateOf(false) }
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
             .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        Text("$selectedCount selected")
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            if (allAudio) {
-                Text("Loop", modifier = Modifier.padding(end = 4.dp))
-                Switch(checked = loop, onCheckedChange = { loop = it })
-                TextButton(onClick = { onPlay(loop) }) { Text("Play") }
+        Text("$selectedCount selected", modifier = Modifier.padding(end = 8.dp))
+        TextButton(onClick = onSelectAll) { Text("Select all") }
+        if (allAudio) {
+            Text("Loop", modifier = Modifier.padding(start = 8.dp, end = 4.dp))
+            Switch(checked = loop, onCheckedChange = { loop = it })
+            TextButton(onClick = { onPlay(loop) }) { Text("Play") }
+        }
+        TextButton(onClick = onDelete) { Text("Delete") }
+        TextButton(onClick = onCancel) { Text("Cancel") }
+    }
+}
+
+@Composable
+private fun <T> FilterDropdown(currentLabel: String, options: List<Pair<String, T>>, onSelect: (T) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        AssistChip(onClick = { expanded = true }, label = { Text(currentLabel) })
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            options.forEach { (label, value) ->
+                DropdownMenuItem(
+                    text = { Text(label) },
+                    onClick = {
+                        onSelect(value)
+                        expanded = false
+                    }
+                )
             }
-            TextButton(onClick = onCancel) { Text("Cancel") }
         }
     }
 }
