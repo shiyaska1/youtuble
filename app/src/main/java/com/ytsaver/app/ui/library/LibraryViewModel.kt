@@ -237,7 +237,10 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
             val allCategories = categoryDao.observeAll().first()
             val result = BackupManager.backup(getApplication(), treeUri, allItems, allCategories)
             _snackbarMessage.value = result.fold(
-                onSuccess = { count -> "Backed up $count file(s)" },
+                onSuccess = { r ->
+                    if (r.skipped > 0) "Backed up ${r.copied} file(s), skipped ${r.skipped} (missing/unreadable)"
+                    else "Backed up ${r.copied} file(s)"
+                },
                 onFailure = { e -> "Backup failed: ${e.message}" }
             )
         }
@@ -247,7 +250,10 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             val result = BackupManager.restore(getApplication(), treeUri, dao, categoryDao)
             _snackbarMessage.value = result.fold(
-                onSuccess = { count -> "Restored $count file(s)" },
+                onSuccess = { r ->
+                    if (r.skipped > 0) "Restored ${r.copied} file(s), skipped ${r.skipped} (missing/unreadable)"
+                    else "Restored ${r.copied} file(s)"
+                },
                 onFailure = { e -> "Restore failed: ${e.message}" }
             )
         }

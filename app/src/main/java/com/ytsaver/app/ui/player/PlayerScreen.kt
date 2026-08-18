@@ -6,9 +6,11 @@ import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -24,13 +26,16 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.exoplayer.ExoPlayer
@@ -49,6 +54,7 @@ fun PlayerScreen(
     val activity = remember(context) { context.findActivity() }
     var isFullscreen by remember { mutableStateOf(false) }
     val isInPip by PipState.isInPip.collectAsState()
+    var playbackError by remember { mutableStateOf<String?>(null) }
 
     val exoPlayer = remember {
         ExoPlayer.Builder(context).build().apply {
@@ -62,6 +68,10 @@ fun PlayerScreen(
                         val ratio = (videoSize.width.toFloat() / videoSize.height).coerceIn(1f / 2.39f, 2.39f)
                         PipState.aspectRatio = Rational((ratio * 1000).toInt(), 1000)
                     }
+                }
+
+                override fun onPlayerError(error: PlaybackException) {
+                    playbackError = "Couldn't play this file — it may have been moved or deleted outside the app."
                 }
             })
         }
@@ -118,18 +128,31 @@ fun PlayerScreen(
             }
         }
     ) { padding ->
-        AndroidView(
-            modifier = if (isFullscreen || isInPip) Modifier.fillMaxSize() else Modifier.fillMaxSize().padding(padding),
-            factory = { ctx ->
-                PlayerView(ctx).apply {
-                    player = exoPlayer
-                    keepScreenOn = true
-                    setFullscreenButtonClickListener { fullscreenWanted ->
-                        setFullscreen(fullscreenWanted)
+        Box(
+            modifier = if (isFullscreen || isInPip) Modifier.fillMaxSize() else Modifier.fillMaxSize().padding(padding)
+        ) {
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { ctx ->
+                    PlayerView(ctx).apply {
+                        player = exoPlayer
+                        keepScreenOn = true
+                        setFullscreenButtonClickListener { fullscreenWanted ->
+                            setFullscreen(fullscreenWanted)
+                        }
                     }
                 }
+            )
+            playbackError?.let { message ->
+                Text(
+                    text = message,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .padding(24.dp)
+                )
             }
-        )
+        }
     }
 }
 

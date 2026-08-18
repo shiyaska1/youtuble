@@ -2,8 +2,11 @@ package com.ytsaver.app.playback
 
 import android.app.PendingIntent
 import android.content.Intent
+import android.widget.Toast
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
@@ -27,6 +30,22 @@ class PlaybackService : MediaSessionService() {
                     .build(),
                 true
             )
+            addListener(object : Player.Listener {
+                override fun onPlayerError(error: PlaybackException) {
+                    // A file deleted outside the app (or otherwise unreadable) shouldn't
+                    // silently stall the whole queue — skip it and keep going.
+                    Toast.makeText(
+                        this@PlaybackService,
+                        "Skipped a file that couldn't be played (missing or moved)",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    if (hasNextMediaItem()) {
+                        seekToNext()
+                        prepare()
+                        play()
+                    }
+                }
+            })
         }
         val sessionActivity = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java),

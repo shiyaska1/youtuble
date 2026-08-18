@@ -26,12 +26,14 @@ object BackupManager {
 
     private const val MANIFEST_NAME = "ytsaver_backup.json"
 
+    data class BackupResult(val copied: Int, val skipped: Int)
+
     suspend fun backup(
         context: Context,
         treeUri: Uri,
         items: List<SavedMedia>,
         categories: List<MediaCategory>
-    ): Result<Int> =
+    ): Result<BackupResult> =
         withContext(Dispatchers.IO) {
             runCatching {
                 val root = DocumentFile.fromTreeUri(context, treeUri)
@@ -41,40 +43,46 @@ object BackupManager {
                 root.findFile(MANIFEST_NAME)?.delete()
                 val manifest = JSONArray()
                 var copied = 0
+                var skipped = 0
 
                 for (item in items) {
-                    val input = MediaAccess.openInputStream(context, item.filePath)
-                    if (input == null) continue
+                    // A single item whose file was deleted outside the app (or any other
+                    // per-item failure) must not abort backing up everything else.
+                    val ok = runCatching {
+                        val input = MediaAccess.openInputStream(context, item.filePath)
+                            ?: error("File not found")
 
-                    val existing = root.findFile(item.fileName)
-                    existing?.delete()
-                    val destDoc = root.createFile("application/octet-stream", item.fileName)
-                    if (destDoc == null) {
-                        input.close()
-                        continue
-                    }
-
-                    val output = context.contentResolver.openOutputStream(destDoc.uri)
-                    if (output == null) {
-                        input.close()
-                        continue
-                    }
-                    output.use { out -> input.use { it.copyTo(out) } }
-
-                    manifest.put(
-                        JSONObject().apply {
-                            put("caption", item.caption)
-                            put("sourceUrl", item.sourceUrl)
-                            put("type", item.type.name)
-                            put("fileName", item.fileName)
-                            put("thumbnailUrl", item.thumbnailUrl ?: JSONObject.NULL)
-                            put("sizeBytes", item.sizeBytes)
-                            put("durationSeconds", item.durationSeconds)
-                            put("createdAt", item.createdAt)
-                            put("categoryName", item.categoryId?.let { categoryNameById[it] } ?: JSONObject.NULL)
+                        val existing = root.findFile(item.fileName)
+                        existing?.delete()
+                        val destDoc = root.createFile("application/octet-stream", item.fileName)
+                        if (destDoc == null) {
+                            input.close()
+                            error("Couldn't create destination file")
                         }
-                    )
-                    copied++
+
+                        val output = context.contentResolver.openOutputStream(destDoc.uri)
+                        if (output == null) {
+                            input.close()
+                            error("Couldn't open destination file")
+                        }
+                        output.use { out -> input.use { it.copyTo(out) } }
+
+                        manifest.put(
+                            JSONObject().apply {
+                                put("caption", item.caption)
+                                put("sourceUrl", item.sourceUrl)
+                                put("type", item.type.name)
+                                put("fileName", item.fileName)
+                                put("thumbnailUrl", item.thumbnailUrl ?: JSONObject.NULL)
+                                put("sizeBytes", item.sizeBytes)
+                                put("durationSeconds", item.durationSeconds)
+                                put("createdAt", item.createdAt)
+                                put("categoryName", item.categoryId?.let { categoryNameById[it] } ?: JSONObject.NULL)
+                            }
+                        )
+                    }.isSuccess
+
+                    if (ok) copied++ else skipped++
                 }
 
                 val manifestDoc = root.createFile("application/json", MANIFEST_NAME)
@@ -83,7 +91,7 @@ object BackupManager {
                     out.write(manifest.toString().toByteArray())
                 }
 
-                copied
+                BackupResult(copied, skipped)
             }
         }
 
@@ -92,7 +100,7 @@ object BackupManager {
         treeUri: Uri,
         dao: SavedMediaDao,
         categoryDao: MediaCategoryDao
-    ): Result<Int> =
+    ): Result<BackupResult> =
         withContext(Dispatchers.IO) {
             runCatching {
                 val root = DocumentFile.fromTreeUri(context, treeUri)
@@ -114,6 +122,7 @@ object BackupManager {
 
                 val array = JSONArray(manifestText)
                 var restored = 0
+                var skipped = 0
 
                 for (i in 0 until array.length()) {
                     val entry = array.getJSONObject(i)
@@ -125,44 +134,50 @@ object BackupManager {
                     val alreadyPresent = dao.findBySourceUrlAndType(sourceUrl, type) != null
                     if (alreadyPresent) continue
 
-                    val sourceDoc = root.findFile(fileName) ?: continue
-                    val sourceInput = context.contentResolver.openInputStream(sourceDoc.uri) ?: continue
+                    // One corrupted/missing entry in the backup folder must not abort
+                    // restoring everything else.
+                    val ok = runCatching {
+                        val sourceDoc = root.findFile(fileName) ?: error("Missing from backup folder")
+                        val sourceInput = context.contentResolver.openInputStream(sourceDoc.uri)
+                            ?: error("Couldn't open backed-up file")
 
-                    val storedPath = if (PublicMediaStore.isSupported()) {
-                        val mimeType = if (type == MediaType.VIDEO) "video/mp4" else "audio/mp4"
-                        val uri = PublicMediaStore.createPendingTarget(context, type, fileName, mimeType)
-                        context.contentResolver.openOutputStream(uri)?.use { out ->
-                            sourceInput.use { it.copyTo(out) }
+                        val storedPath = if (PublicMediaStore.isSupported()) {
+                            val mimeType = if (type == MediaType.VIDEO) "video/mp4" else "audio/mp4"
+                            val uri = PublicMediaStore.createPendingTarget(context, type, fileName, mimeType)
+                            context.contentResolver.openOutputStream(uri)?.use { out ->
+                                sourceInput.use { it.copyTo(out) }
+                            }
+                            PublicMediaStore.finalize(context, uri)
+                            uri.toString()
+                        } else {
+                            val targetDir = legacyMediaDir(context, type)
+                            val targetFile = uniqueFile(targetDir, fileName)
+                            targetFile.outputStream().use { out ->
+                                sourceInput.use { it.copyTo(out) }
+                            }
+                            targetFile.absolutePath
                         }
-                        PublicMediaStore.finalize(context, uri)
-                        uri.toString()
-                    } else {
-                        val targetDir = legacyMediaDir(context, type)
-                        val targetFile = uniqueFile(targetDir, fileName)
-                        targetFile.outputStream().use { out ->
-                            sourceInput.use { it.copyTo(out) }
-                        }
-                        targetFile.absolutePath
-                    }
 
-                    val categoryName = entry.optString("categoryName").ifBlank { null }
-                    dao.insert(
-                        SavedMedia(
-                            caption = caption,
-                            sourceUrl = sourceUrl,
-                            type = type,
-                            filePath = storedPath,
-                            fileName = fileName,
-                            thumbnailUrl = entry.optString("thumbnailUrl").ifBlank { null },
-                            sizeBytes = MediaAccess.length(context, storedPath),
-                            durationSeconds = entry.optLong("durationSeconds", 0),
-                            createdAt = entry.optLong("createdAt", System.currentTimeMillis()),
-                            categoryId = categoryName?.let { categoryIdFor(it) }
+                        val categoryName = entry.optString("categoryName").ifBlank { null }
+                        dao.insert(
+                            SavedMedia(
+                                caption = caption,
+                                sourceUrl = sourceUrl,
+                                type = type,
+                                filePath = storedPath,
+                                fileName = fileName,
+                                thumbnailUrl = entry.optString("thumbnailUrl").ifBlank { null },
+                                sizeBytes = MediaAccess.length(context, storedPath),
+                                durationSeconds = entry.optLong("durationSeconds", 0),
+                                createdAt = entry.optLong("createdAt", System.currentTimeMillis()),
+                                categoryId = categoryName?.let { categoryIdFor(it) }
+                            )
                         )
-                    )
-                    restored++
+                    }.isSuccess
+
+                    if (ok) restored++ else skipped++
                 }
-                restored
+                BackupResult(restored, skipped)
             }
         }
 
