@@ -15,8 +15,14 @@ object LicenseManager {
 
     private val TRIAL_DURATION_MILLIS = TimeUnit.DAYS.toMillis(30)
 
-    // Key required to unlock the app once the trial has expired.
-    private const val UNLOCK_KEY = "YTSAVER-UNLOCK-2026"
+    // Any one of these unlocks the app once the trial has expired. Add or
+    // remove entries to issue different keys to different customers.
+    private val VALID_KEYS = setOf(
+        "YTSAVER-UNLOCK-2026",
+        "YTSAVER-KEY-0001",
+        "YTSAVER-KEY-0002",
+        "YTSAVER-KEY-0003"
+    )
 
     private fun prefs(context: Context) =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -41,15 +47,8 @@ object LicenseManager {
     fun requiresKey(context: Context): Boolean =
         isTrialExpired(context) && !isUnlocked(context)
 
-    /** Whole days left in the trial, 0 once it has expired. */
-    fun daysRemaining(context: Context): Int {
-        val elapsed = System.currentTimeMillis() - firstLaunchTime(context)
-        val remainingMillis = (TRIAL_DURATION_MILLIS - elapsed).coerceAtLeast(0)
-        return TimeUnit.MILLISECONDS.toDays(remainingMillis).toInt()
-    }
-
     fun tryUnlock(context: Context, enteredKey: String): Boolean {
-        val valid = enteredKey.trim() == UNLOCK_KEY
+        val valid = VALID_KEYS.any { it.equals(enteredKey.trim(), ignoreCase = true) }
         if (valid) {
             prefs(context).edit().putBoolean(KEY_UNLOCKED, true).apply()
         }

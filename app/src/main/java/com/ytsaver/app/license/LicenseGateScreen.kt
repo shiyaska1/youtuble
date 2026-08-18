@@ -10,7 +10,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -22,13 +21,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 
-/**
- * Full-screen key entry. Shown non-dismissibly once the 1-month trial has
- * expired, or dismissibly during the trial when the user opts to activate
- * early (pass [onDismiss] to allow that).
- */
+/** Full-screen block shown once the 1-month trial has expired; unlocks with a valid key. */
 @Composable
-fun LicenseGateScreen(onUnlocked: () -> Unit, onDismiss: (() -> Unit)? = null) {
+fun LicenseGateScreen(onUnlocked: () -> Unit) {
     val context = LocalContext.current
     var key by remember { mutableStateOf("") }
     var error by remember { mutableStateOf(false) }
@@ -62,12 +57,6 @@ fun LicenseGateScreen(onUnlocked: () -> Unit, onDismiss: (() -> Unit)? = null) {
                 if (LicenseManager.tryUnlock(context, key)) onUnlocked() else error = true
             }) {
                 Text("Unlock")
-            }
-            if (onDismiss != null) {
-                Spacer(modifier = Modifier.height(8.dp))
-                TextButton(onClick = onDismiss) {
-                    Text("Not now")
-                }
             }
         }
     }
