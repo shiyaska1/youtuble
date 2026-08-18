@@ -6,6 +6,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.ytsaver.app.YtSaverApp
 import com.ytsaver.app.backup.BackupManager
+import com.ytsaver.app.data.MediaAccess
 import com.ytsaver.app.data.MediaType
 import com.ytsaver.app.data.SavedMedia
 import com.ytsaver.app.playback.PlayerController
@@ -16,7 +17,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import java.io.File
 
 enum class CategoryFilter { ALL, VIDEO, AUDIO }
 
@@ -99,7 +99,7 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
 
     fun delete(item: SavedMedia) {
         viewModelScope.launch {
-            File(item.filePath).delete()
+            MediaAccess.delete(getApplication(), item.filePath)
             dao.delete(item)
         }
     }

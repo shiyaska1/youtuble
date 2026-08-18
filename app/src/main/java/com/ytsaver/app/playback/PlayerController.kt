@@ -8,11 +8,11 @@ import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.google.common.util.concurrent.ListenableFuture
+import com.ytsaver.app.data.MediaAccess
 import com.ytsaver.app.data.SavedMedia
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.guava.await
-import java.io.File
 
 /**
  * Single shared connection to [PlaybackService]'s MediaSession, used for all
@@ -63,7 +63,7 @@ object PlayerController {
     private fun SavedMedia.toMediaItem(): MediaItem =
         MediaItem.Builder()
             .setMediaId(id.toString())
-            .setUri(File(filePath).toURI().toString())
+            .setUri(MediaAccess.playableUriString(filePath))
             .setMediaMetadata(MediaMetadata.Builder().setTitle(caption).build())
             .build()
 }

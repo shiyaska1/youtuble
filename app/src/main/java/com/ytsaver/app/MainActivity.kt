@@ -1,11 +1,17 @@
 package com.ytsaver.app
 
 import android.Manifest
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -26,6 +32,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -50,11 +57,15 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun AppRoot() {
+    val context = LocalContext.current
     val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
+    val batteryOptimizationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {}
+
     LaunchedEffect(Unit) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
+        requestUnrestrictedBatteryOnce(context, batteryOptimizationLauncher)
     }
 
     val navController = rememberNavController()
@@ -120,4 +131,24 @@ private fun MainScaffold(onOpenVideo: (SavedMedia) -> Unit) {
             }
         }
     }
+}
+
+/**
+ * Background audio playback and multi-file downloads get killed by
+ * aggressive OEM battery managers unless the app is exempted from Doze/App
+ * Standby. Ask once, the first time the app is opened.
+ */
+private fun requestUnrestrictedBatteryOnce(context: Context, launcher: ActivityResultLauncher<Intent>) {
+    val prefs = context.getSharedPreferences("ytsaver_prefs", Context.MODE_PRIVATE)
+    if (prefs.getBoolean("asked_battery_optimization", false)) return
+
+    val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+    if (!powerManager.isIgnoringBatteryOptimizations(context.packageName)) {
+        val intent = Intent(
+            Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+            Uri.parse("package:${context.packageName}")
+        )
+        runCatching { launcher.launch(intent) }
+    }
+    prefs.edit().putBoolean("asked_battery_optimization", true).apply()
 }

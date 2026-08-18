@@ -3,7 +3,9 @@ package com.ytsaver.app.backup
 import android.content.Context
 import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
+import com.ytsaver.app.data.MediaAccess
 import com.ytsaver.app.data.MediaType
+import com.ytsaver.app.data.PublicMediaStore
 import com.ytsaver.app.data.SavedMedia
 import com.ytsaver.app.data.SavedMediaDao
 import kotlinx.coroutines.Dispatchers
@@ -32,24 +34,30 @@ object BackupManager {
                 var copied = 0
 
                 for (item in items) {
-                    val sourceFile = File(item.filePath)
-                    if (!sourceFile.exists()) continue
+                    val input = MediaAccess.openInputStream(context, item.filePath)
+                    if (input == null) continue
 
-                    val existing = root.findFile(sourceFile.name)
+                    val existing = root.findFile(item.fileName)
                     existing?.delete()
-                    val destDoc = root.createFile("application/octet-stream", sourceFile.name)
-                        ?: continue
-
-                    context.contentResolver.openOutputStream(destDoc.uri)?.use { out ->
-                        sourceFile.inputStream().use { it.copyTo(out) }
+                    val destDoc = root.createFile("application/octet-stream", item.fileName)
+                    if (destDoc == null) {
+                        input.close()
+                        continue
                     }
+
+                    val output = context.contentResolver.openOutputStream(destDoc.uri)
+                    if (output == null) {
+                        input.close()
+                        continue
+                    }
+                    output.use { out -> input.use { it.copyTo(out) } }
 
                     manifest.put(
                         JSONObject().apply {
                             put("caption", item.caption)
                             put("sourceUrl", item.sourceUrl)
                             put("type", item.type.name)
-                            put("fileName", sourceFile.name)
+                            put("fileName", item.fileName)
                             put("thumbnailUrl", item.thumbnailUrl ?: JSONObject.NULL)
                             put("sizeBytes", item.sizeBytes)
                             put("durationSeconds", item.durationSeconds)
@@ -95,21 +103,34 @@ object BackupManager {
                     if (alreadyPresent) continue
 
                     val sourceDoc = root.findFile(fileName) ?: continue
-                    val targetDir = mediaDir(context, type)
-                    val targetFile = uniqueFile(targetDir, fileName)
+                    val sourceInput = context.contentResolver.openInputStream(sourceDoc.uri) ?: continue
 
-                    context.contentResolver.openInputStream(sourceDoc.uri)?.use { input ->
-                        targetFile.outputStream().use { output -> input.copyTo(output) }
-                    } ?: continue
+                    val storedPath = if (PublicMediaStore.isSupported()) {
+                        val mimeType = if (type == MediaType.VIDEO) "video/mp4" else "audio/mp4"
+                        val uri = PublicMediaStore.createPendingTarget(context, type, fileName, mimeType)
+                        context.contentResolver.openOutputStream(uri)?.use { out ->
+                            sourceInput.use { it.copyTo(out) }
+                        }
+                        PublicMediaStore.finalize(context, uri)
+                        uri.toString()
+                    } else {
+                        val targetDir = legacyMediaDir(context, type)
+                        val targetFile = uniqueFile(targetDir, fileName)
+                        targetFile.outputStream().use { out ->
+                            sourceInput.use { it.copyTo(out) }
+                        }
+                        targetFile.absolutePath
+                    }
 
                     dao.insert(
                         SavedMedia(
                             caption = caption,
                             sourceUrl = sourceUrl,
                             type = type,
-                            filePath = targetFile.absolutePath,
+                            filePath = storedPath,
+                            fileName = fileName,
                             thumbnailUrl = entry.optString("thumbnailUrl").ifBlank { null },
-                            sizeBytes = targetFile.length(),
+                            sizeBytes = MediaAccess.length(context, storedPath),
                             durationSeconds = entry.optLong("durationSeconds", 0),
                             createdAt = entry.optLong("createdAt", System.currentTimeMillis())
                         )
@@ -120,7 +141,7 @@ object BackupManager {
             }
         }
 
-    private fun mediaDir(context: Context, type: MediaType): File {
+    private fun legacyMediaDir(context: Context, type: MediaType): File {
         val publicSubDir = if (type == MediaType.VIDEO) android.os.Environment.DIRECTORY_MOVIES
         else android.os.Environment.DIRECTORY_MUSIC
         val dir = context.getExternalFilesDir(publicSubDir) ?: context.filesDir

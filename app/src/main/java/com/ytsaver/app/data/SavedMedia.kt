@@ -16,7 +16,9 @@ data class SavedMedia(
     val caption: String,
     val sourceUrl: String,
     val type: MediaType,
+    /** Either a plain file path (legacy/API<29) or a content:// MediaStore URI string. */
     val filePath: String,
+    val fileName: String,
     val thumbnailUrl: String?,
     val sizeBytes: Long,
     val durationSeconds: Long,

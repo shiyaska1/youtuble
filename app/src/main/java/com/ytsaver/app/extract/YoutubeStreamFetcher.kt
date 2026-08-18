@@ -7,6 +7,7 @@ import org.schabi.newpipe.extractor.stream.StreamInfo
 data class MediaOption(
     val streamUrl: String,
     val fileExtension: String,
+    val mimeType: String,
     val label: String
 )
 
@@ -38,6 +39,7 @@ object YoutubeStreamFetcher {
                     MediaOption(
                         streamUrl = it.url!!,
                         fileExtension = it.format?.suffix ?: "mp4",
+                        mimeType = it.format?.mimeType ?: "video/mp4",
                         label = it.resolution ?: "Video"
                     )
                 }
@@ -49,6 +51,7 @@ object YoutubeStreamFetcher {
                     MediaOption(
                         streamUrl = it.url!!,
                         fileExtension = it.format?.suffix ?: "m4a",
+                        mimeType = it.format?.mimeType ?: "audio/mp4",
                         label = if (it.averageBitrate > 0) "${it.averageBitrate} kbps" else "Audio"
                     )
                 }

@@ -31,7 +31,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
-import java.io.File
+import com.ytsaver.app.data.MediaAccess
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -47,7 +47,7 @@ fun PlayerScreen(
 
     val exoPlayer = remember {
         ExoPlayer.Builder(context).build().apply {
-            setMediaItem(MediaItem.fromUri(File(filePath).toURI().toString()))
+            setMediaItem(MediaItem.fromUri(MediaAccess.playableUriString(filePath)))
             playWhenReady = true
             prepare()
         }
