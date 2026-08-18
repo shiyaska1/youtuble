@@ -1,6 +1,8 @@
 package com.ytsaver.app.data
 
 import androidx.room.Entity
+import androidx.room.ForeignKey
+import androidx.room.Index
 import androidx.room.PrimaryKey
 
 enum class MediaType { VIDEO, AUDIO }
@@ -10,7 +12,18 @@ enum class MediaType { VIDEO, AUDIO }
  * media file under the app's private media directory; [caption] is the
  * user-visible name (defaults to the YouTube video title).
  */
-@Entity(tableName = "saved_media")
+@Entity(
+    tableName = "saved_media",
+    foreignKeys = [
+        ForeignKey(
+            entity = MediaCategory::class,
+            parentColumns = ["id"],
+            childColumns = ["categoryId"],
+            onDelete = ForeignKey.SET_NULL
+        )
+    ],
+    indices = [Index("categoryId")]
+)
 data class SavedMedia(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val caption: String,
@@ -22,5 +35,6 @@ data class SavedMedia(
     val thumbnailUrl: String?,
     val sizeBytes: Long,
     val durationSeconds: Long,
-    val createdAt: Long
+    val createdAt: Long,
+    val categoryId: Long? = null
 )

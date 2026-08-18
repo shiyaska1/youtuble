@@ -4,11 +4,14 @@ import android.content.Context
 import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
 import com.ytsaver.app.data.MediaAccess
+import com.ytsaver.app.data.MediaCategory
+import com.ytsaver.app.data.MediaCategoryDao
 import com.ytsaver.app.data.MediaType
 import com.ytsaver.app.data.PublicMediaStore
 import com.ytsaver.app.data.SavedMedia
 import com.ytsaver.app.data.SavedMediaDao
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -23,11 +26,17 @@ object BackupManager {
 
     private const val MANIFEST_NAME = "ytsaver_backup.json"
 
-    suspend fun backup(context: Context, treeUri: Uri, items: List<SavedMedia>): Result<Int> =
+    suspend fun backup(
+        context: Context,
+        treeUri: Uri,
+        items: List<SavedMedia>,
+        categories: List<MediaCategory>
+    ): Result<Int> =
         withContext(Dispatchers.IO) {
             runCatching {
                 val root = DocumentFile.fromTreeUri(context, treeUri)
                     ?: error("Couldn't open the chosen folder")
+                val categoryNameById = categories.associate { it.id to it.name }
 
                 root.findFile(MANIFEST_NAME)?.delete()
                 val manifest = JSONArray()
@@ -62,6 +71,7 @@ object BackupManager {
                             put("sizeBytes", item.sizeBytes)
                             put("durationSeconds", item.durationSeconds)
                             put("createdAt", item.createdAt)
+                            put("categoryName", item.categoryId?.let { categoryNameById[it] } ?: JSONObject.NULL)
                         }
                     )
                     copied++
@@ -77,7 +87,12 @@ object BackupManager {
             }
         }
 
-    suspend fun restore(context: Context, treeUri: Uri, dao: SavedMediaDao): Result<Int> =
+    suspend fun restore(
+        context: Context,
+        treeUri: Uri,
+        dao: SavedMediaDao,
+        categoryDao: MediaCategoryDao
+    ): Result<Int> =
         withContext(Dispatchers.IO) {
             runCatching {
                 val root = DocumentFile.fromTreeUri(context, treeUri)
@@ -88,6 +103,14 @@ object BackupManager {
                 val manifestText = context.contentResolver.openInputStream(manifestDoc.uri)
                     ?.use { it.readBytes().toString(Charsets.UTF_8) }
                     ?: error("Couldn't read the backup manifest")
+
+                val categoryIdByName = categoryDao.observeAll().first()
+                    .associateTo(mutableMapOf()) { it.name to it.id }
+
+                suspend fun categoryIdFor(name: String): Long =
+                    categoryIdByName.getOrPut(name) {
+                        categoryDao.insert(MediaCategory(name = name))
+                    }
 
                 val array = JSONArray(manifestText)
                 var restored = 0
@@ -122,6 +145,7 @@ object BackupManager {
                         targetFile.absolutePath
                     }
 
+                    val categoryName = entry.optString("categoryName").ifBlank { null }
                     dao.insert(
                         SavedMedia(
                             caption = caption,
@@ -132,7 +156,8 @@ object BackupManager {
                             thumbnailUrl = entry.optString("thumbnailUrl").ifBlank { null },
                             sizeBytes = MediaAccess.length(context, storedPath),
                             durationSeconds = entry.optLong("durationSeconds", 0),
-                            createdAt = entry.optLong("createdAt", System.currentTimeMillis())
+                            createdAt = entry.optLong("createdAt", System.currentTimeMillis()),
+                            categoryId = categoryName?.let { categoryIdFor(it) }
                         )
                     )
                     restored++

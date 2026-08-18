@@ -16,6 +16,12 @@ interface SavedMediaDao {
     @Query("SELECT * FROM saved_media WHERE sourceUrl = :sourceUrl AND type = :type LIMIT 1")
     suspend fun findBySourceUrlAndType(sourceUrl: String, type: MediaType): SavedMedia?
 
+    @Query("UPDATE saved_media SET caption = :caption WHERE id = :id")
+    suspend fun updateCaption(id: Long, caption: String)
+
+    @Query("UPDATE saved_media SET categoryId = :categoryId WHERE id IN (:ids)")
+    suspend fun updateCategory(ids: List<Long>, categoryId: Long?)
+
     @Insert
     suspend fun insert(item: SavedMedia): Long
 

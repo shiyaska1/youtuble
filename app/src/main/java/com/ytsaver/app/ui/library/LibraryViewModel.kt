@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import com.ytsaver.app.YtSaverApp
 import com.ytsaver.app.backup.BackupManager
 import com.ytsaver.app.data.MediaAccess
+import com.ytsaver.app.data.MediaCategory
 import com.ytsaver.app.data.MediaType
 import com.ytsaver.app.data.SavedMedia
 import com.ytsaver.app.playback.PlayerController
@@ -15,6 +16,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -22,12 +24,21 @@ enum class CategoryFilter { ALL, VIDEO, AUDIO }
 
 enum class SortOption { DATE_NEWEST, DATE_OLDEST, SIZE_LARGEST, SIZE_SMALLEST }
 
+/** Which named album (if any) the list is narrowed to. Distinct from [CategoryFilter], which is video-vs-audio. */
+sealed class AlbumFilter {
+    data object All : AlbumFilter()
+    data object Uncategorized : AlbumFilter()
+    data class ById(val id: Long) : AlbumFilter()
+}
+
 private const val DAY_MILLIS = 24L * 60 * 60 * 1000
 
 data class LibraryUiState(
     val items: List<SavedMedia> = emptyList(),
+    val albums: List<MediaCategory> = emptyList(),
     val query: String = "",
     val category: CategoryFilter = CategoryFilter.ALL,
+    val albumFilter: AlbumFilter = AlbumFilter.All,
     val sort: SortOption = SortOption.DATE_NEWEST,
     val minSizeBytes: Long = 0,
     val minAgeDays: Int = 0,
@@ -38,12 +49,14 @@ data class LibraryUiState(
 class LibraryViewModel(application: Application) : AndroidViewModel(application) {
 
     private val dao = (application as YtSaverApp).database.savedMediaDao()
+    private val categoryDao = (application as YtSaverApp).database.mediaCategoryDao()
 
     private val _snackbarMessage = MutableStateFlow<String?>(null)
     val snackbarMessage: StateFlow<String?> = _snackbarMessage.asStateFlow()
 
     private val query = MutableStateFlow("")
     private val category = MutableStateFlow(CategoryFilter.ALL)
+    private val albumFilter = MutableStateFlow<AlbumFilter>(AlbumFilter.All)
     private val sort = MutableStateFlow(SortOption.DATE_NEWEST)
     private val minSizeBytes = MutableStateFlow(0L)
     private val minAgeDays = MutableStateFlow(0)
@@ -52,23 +65,34 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
 
     val uiState: StateFlow<LibraryUiState> =
         combine(
-            dao.observeAll(), query, category, sort, minSizeBytes, minAgeDays, selectionMode, selectedIds
+            dao.observeAll(), categoryDao.observeAll(), query, category, albumFilter,
+            sort, minSizeBytes, minAgeDays, selectionMode, selectedIds
         ) { values ->
             @Suppress("UNCHECKED_CAST")
             val items = values[0] as List<SavedMedia>
-            val q = values[1] as String
-            val cat = values[2] as CategoryFilter
-            val sortOption = values[3] as SortOption
-            val minSize = values[4] as Long
-            val minAge = values[5] as Int
-            val selMode = values[6] as Boolean
             @Suppress("UNCHECKED_CAST")
-            val selIds = values[7] as Set<Long>
+            val albums = values[1] as List<MediaCategory>
+            val q = values[2] as String
+            val cat = values[3] as CategoryFilter
+            val album = values[4] as AlbumFilter
+            val sortOption = values[5] as SortOption
+            val minSize = values[6] as Long
+            val minAge = values[7] as Int
+            val selMode = values[8] as Boolean
+            @Suppress("UNCHECKED_CAST")
+            val selIds = values[9] as Set<Long>
 
             val cutoff = if (minAge > 0) System.currentTimeMillis() - minAge * DAY_MILLIS else Long.MAX_VALUE
 
             val filtered = items
                 .filter { cat == CategoryFilter.ALL || (cat == CategoryFilter.VIDEO) == (it.type == MediaType.VIDEO) }
+                .filter {
+                    when (album) {
+                        is AlbumFilter.All -> true
+                        is AlbumFilter.Uncategorized -> it.categoryId == null
+                        is AlbumFilter.ById -> it.categoryId == album.id
+                    }
+                }
                 .filter { q.isBlank() || it.caption.contains(q, ignoreCase = true) }
                 .filter { minSize <= 0 || it.sizeBytes >= minSize }
                 .filter { minAge <= 0 || it.createdAt <= cutoff }
@@ -80,7 +104,7 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
                 SortOption.SIZE_SMALLEST -> filtered.sortedBy { it.sizeBytes }
             }
 
-            LibraryUiState(sorted, q, cat, sortOption, minSize, minAge, selMode, selIds)
+            LibraryUiState(sorted, albums, q, cat, album, sortOption, minSize, minAge, selMode, selIds)
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), LibraryUiState())
 
     fun onQueryChanged(value: String) {
@@ -89,6 +113,11 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
 
     fun onCategoryChanged(value: CategoryFilter) {
         category.value = value
+        exitSelection()
+    }
+
+    fun onAlbumFilterChanged(value: AlbumFilter) {
+        albumFilter.value = value
         exitSelection()
     }
 
@@ -160,9 +189,53 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
         exitSelection()
     }
 
+    fun rename(item: SavedMedia, newCaption: String) {
+        val trimmed = newCaption.trim()
+        if (trimmed.isBlank()) return
+        viewModelScope.launch { dao.updateCaption(item.id, trimmed) }
+    }
+
+    /** Creates an empty category (not yet assigned to anything). No-op if the name already exists. */
+    fun createCategory(name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isBlank()) return
+        viewModelScope.launch {
+            val exists = uiState.value.albums.any { it.name.equals(trimmed, ignoreCase = true) }
+            if (!exists) categoryDao.insert(MediaCategory(name = trimmed))
+        }
+    }
+
+    /** Creates the category if [name] is new, then assigns [ids] to it. Pass a null [name] (via [assignCategory]) to clear. */
+    fun createAndAssignCategory(ids: Set<Long>, name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isBlank() || ids.isEmpty()) return
+        viewModelScope.launch {
+            val existing = uiState.value.albums.find { it.name.equals(trimmed, ignoreCase = true) }
+            val categoryId = existing?.id ?: categoryDao.insert(MediaCategory(name = trimmed))
+            dao.updateCategory(ids.toList(), categoryId)
+        }
+        exitSelection()
+    }
+
+    fun assignCategory(ids: Set<Long>, categoryId: Long?) {
+        if (ids.isEmpty()) return
+        viewModelScope.launch { dao.updateCategory(ids.toList(), categoryId) }
+        exitSelection()
+    }
+
+    fun deleteCategory(category: MediaCategory) {
+        viewModelScope.launch {
+            categoryDao.delete(category)
+            if (albumFilter.value == AlbumFilter.ById(category.id)) albumFilter.value = AlbumFilter.All
+        }
+    }
+
     fun backupTo(treeUri: Uri) {
         viewModelScope.launch {
-            val result = BackupManager.backup(getApplication(), treeUri, uiState.value.items)
+            // Back up everything, not just what's currently filtered/visible.
+            val allItems = dao.observeAll().first()
+            val allCategories = categoryDao.observeAll().first()
+            val result = BackupManager.backup(getApplication(), treeUri, allItems, allCategories)
             _snackbarMessage.value = result.fold(
                 onSuccess = { count -> "Backed up $count file(s)" },
                 onFailure = { e -> "Backup failed: ${e.message}" }
@@ -172,7 +245,7 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
 
     fun restoreFrom(treeUri: Uri) {
         viewModelScope.launch {
-            val result = BackupManager.restore(getApplication(), treeUri, dao)
+            val result = BackupManager.restore(getApplication(), treeUri, dao, categoryDao)
             _snackbarMessage.value = result.fold(
                 onSuccess = { count -> "Restored $count file(s)" },
                 onFailure = { e -> "Restore failed: ${e.message}" }

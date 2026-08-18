@@ -19,9 +19,12 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -40,7 +43,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
@@ -62,6 +64,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
+import com.ytsaver.app.data.MediaCategory
 import com.ytsaver.app.data.MediaType
 import com.ytsaver.app.data.SavedMedia
 import com.ytsaver.app.playback.PlayerController
@@ -101,6 +104,10 @@ fun LibraryScreen(
 
     var pendingDelete by remember { mutableStateOf<SavedMedia?>(null) }
     var pendingBulkDelete by remember { mutableStateOf(false) }
+    var pendingRename by remember { mutableStateOf<SavedMedia?>(null) }
+    var pendingMoveItem by remember { mutableStateOf<SavedMedia?>(null) }
+    var pendingMoveSelection by remember { mutableStateOf(false) }
+    var pendingNewCategory by remember { mutableStateOf(false) }
 
     val backupLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri: Uri? ->
         uri?.let {
@@ -162,6 +169,57 @@ fun LibraryScreen(
         )
     }
 
+    pendingRename?.let { item ->
+        RenameDialog(
+            initialCaption = item.caption,
+            onDismiss = { pendingRename = null },
+            onSave = { newCaption ->
+                viewModel.rename(item, newCaption)
+                pendingRename = null
+            }
+        )
+    }
+
+    pendingMoveItem?.let { item ->
+        MoveToCategoryDialog(
+            albums = state.albums,
+            onDismiss = { pendingMoveItem = null },
+            onAssign = { categoryId ->
+                viewModel.assignCategory(setOf(item.id), categoryId)
+                pendingMoveItem = null
+            },
+            onCreateAndAssign = { name ->
+                viewModel.createAndAssignCategory(setOf(item.id), name)
+                pendingMoveItem = null
+            }
+        )
+    }
+
+    if (pendingMoveSelection) {
+        MoveToCategoryDialog(
+            albums = state.albums,
+            onDismiss = { pendingMoveSelection = false },
+            onAssign = { categoryId ->
+                viewModel.assignCategory(state.selectedIds, categoryId)
+                pendingMoveSelection = false
+            },
+            onCreateAndAssign = { name ->
+                viewModel.createAndAssignCategory(state.selectedIds, name)
+                pendingMoveSelection = false
+            }
+        )
+    }
+
+    if (pendingNewCategory) {
+        NewCategoryDialog(
+            onDismiss = { pendingNewCategory = false },
+            onCreate = { name ->
+                viewModel.createCategory(name)
+                pendingNewCategory = false
+            }
+        )
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -186,7 +244,14 @@ fun LibraryScreen(
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp, vertical = 8.dp),
                 singleLine = true,
-                label = { Text("Search by name") }
+                label = { Text("Search by name") },
+                trailingIcon = {
+                    if (state.query.isNotEmpty()) {
+                        IconButton(onClick = { viewModel.onQueryChanged("") }) {
+                            Icon(Icons.Default.Clear, contentDescription = "Clear search")
+                        }
+                    }
+                }
             )
 
             Row(
@@ -209,6 +274,37 @@ fun LibraryScreen(
                     selected = state.category == CategoryFilter.AUDIO,
                     onClick = { viewModel.onCategoryChanged(CategoryFilter.AUDIO) },
                     label = { Text("Audio (MP3)") }
+                )
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 4.dp)
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                FilterChip(
+                    selected = state.albumFilter == AlbumFilter.All,
+                    onClick = { viewModel.onAlbumFilterChanged(AlbumFilter.All) },
+                    label = { Text("All categories") }
+                )
+                FilterChip(
+                    selected = state.albumFilter == AlbumFilter.Uncategorized,
+                    onClick = { viewModel.onAlbumFilterChanged(AlbumFilter.Uncategorized) },
+                    label = { Text("Uncategorized") }
+                )
+                state.albums.forEach { album ->
+                    FilterChip(
+                        selected = state.albumFilter == AlbumFilter.ById(album.id),
+                        onClick = { viewModel.onAlbumFilterChanged(AlbumFilter.ById(album.id)) },
+                        label = { Text(album.name) }
+                    )
+                }
+                AssistChip(
+                    onClick = { pendingNewCategory = true },
+                    label = { Text("New category") },
+                    leadingIcon = { Icon(Icons.Default.Add, contentDescription = null) }
                 )
             }
 
@@ -243,7 +339,8 @@ fun LibraryScreen(
                     onCancel = viewModel::exitSelection,
                     onSelectAll = viewModel::selectAllVisible,
                     onPlay = { loop -> viewModel.playSelected(loop) },
-                    onDelete = { pendingBulkDelete = true }
+                    onDelete = { pendingBulkDelete = true },
+                    onMove = { pendingMoveSelection = true }
                 )
             }
 
@@ -252,6 +349,7 @@ fun LibraryScreen(
                     items(state.items, key = { it.id }) { item ->
                         LibraryRow(
                             item = item,
+                            categoryName = state.albums.find { it.id == item.categoryId }?.name,
                             selectionMode = state.selectionMode,
                             selected = item.id in state.selectedIds,
                             onClick = {
@@ -262,6 +360,8 @@ fun LibraryScreen(
                                 }
                             },
                             onLongClick = { viewModel.enterSelection(item.id) },
+                            onRename = { pendingRename = item },
+                            onMoveCategory = { pendingMoveItem = item },
                             onDelete = { pendingDelete = item }
                         )
                     }
@@ -274,13 +374,100 @@ fun LibraryScreen(
 }
 
 @Composable
+private fun RenameDialog(initialCaption: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
+    var text by remember { mutableStateOf(initialCaption) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Rename") },
+        text = {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = { onSave(text) }, enabled = text.isNotBlank()) { Text("Save") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
+}
+
+@Composable
+private fun NewCategoryDialog(onDismiss: () -> Unit, onCreate: (String) -> Unit) {
+    var text by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("New category") },
+        text = {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it },
+                singleLine = true,
+                label = { Text("Category name") },
+                modifier = Modifier.fillMaxWidth()
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = { onCreate(text) }, enabled = text.isNotBlank()) { Text("Create") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
+}
+
+@Composable
+private fun MoveToCategoryDialog(
+    albums: List<MediaCategory>,
+    onDismiss: () -> Unit,
+    onAssign: (categoryId: Long?) -> Unit,
+    onCreateAndAssign: (name: String) -> Unit
+) {
+    var newName by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Move to category") },
+        text = {
+            Column {
+                TextButton(onClick = { onAssign(null) }) { Text("No category") }
+                albums.forEach { album ->
+                    TextButton(onClick = { onAssign(album.id) }) { Text(album.name) }
+                }
+                OutlinedTextField(
+                    value = newName,
+                    onValueChange = { newName = it },
+                    label = { Text("New category name") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp)
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onCreateAndAssign(newName) }, enabled = newName.isNotBlank()) {
+                Text("Create & Move")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
+}
+
+@Composable
 private fun SelectionBar(
     selectedCount: Int,
     allAudio: Boolean,
     onCancel: () -> Unit,
     onSelectAll: () -> Unit,
     onPlay: (loop: Boolean) -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    onMove: () -> Unit
 ) {
     var loop by remember { mutableStateOf(false) }
     Row(
@@ -298,6 +485,7 @@ private fun SelectionBar(
             Switch(checked = loop, onCheckedChange = { loop = it })
             TextButton(onClick = { onPlay(loop) }) { Text("Play") }
         }
+        TextButton(onClick = onMove) { Text("Move") }
         TextButton(onClick = onDelete) { Text("Delete") }
         TextButton(onClick = onCancel) { Text("Cancel") }
     }
@@ -326,12 +514,17 @@ private fun <T> FilterDropdown(currentLabel: String, options: List<Pair<String, 
 @Composable
 private fun LibraryRow(
     item: SavedMedia,
+    categoryName: String?,
     selectionMode: Boolean,
     selected: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
+    onRename: () -> Unit,
+    onMoveCategory: () -> Unit,
     onDelete: () -> Unit
 ) {
+    var menuExpanded by remember { mutableStateOf(false) }
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -363,13 +556,32 @@ private fun LibraryRow(
         Column(modifier = Modifier.weight(1f)) {
             Text(item.caption, maxLines = 2, style = MaterialTheme.typography.bodyLarge)
             Text(
-                "${formatSize(item.sizeBytes)} • ${DateFormat.getDateInstance().format(Date(item.createdAt))}",
+                buildString {
+                    append(formatSize(item.sizeBytes))
+                    append(" • ")
+                    append(DateFormat.getDateInstance().format(Date(item.createdAt)))
+                    if (categoryName != null) {
+                        append(" • ")
+                        append(categoryName)
+                    }
+                },
                 style = MaterialTheme.typography.bodySmall
             )
         }
 
-        IconButton(onClick = onDelete) {
-            Icon(Icons.Default.Delete, contentDescription = "Delete")
+        Box {
+            IconButton(onClick = { menuExpanded = true }) {
+                Icon(Icons.Default.MoreVert, contentDescription = "More options")
+            }
+            DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+                DropdownMenuItem(text = { Text("Rename") }, onClick = { menuExpanded = false; onRename() })
+                DropdownMenuItem(text = { Text("Move to category") }, onClick = { menuExpanded = false; onMoveCategory() })
+                DropdownMenuItem(
+                    text = { Text("Delete") },
+                    onClick = { menuExpanded = false; onDelete() },
+                    leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null) }
+                )
+            }
         }
     }
 }
