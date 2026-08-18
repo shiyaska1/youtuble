@@ -68,7 +68,7 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     // YouTube stream extraction (open-source, same engine NewPipe uses)
-    implementation("com.github.TeamNewPipe:NewPipeExtractor:v0.24.4")
+    implementation("com.github.TeamNewPipe:NewPipeExtractor:v0.26.5")
 
     // Playback (video + audio) for offline files. media3-session powers a
     // background-capable MediaSessionService so audio keeps playing when the
