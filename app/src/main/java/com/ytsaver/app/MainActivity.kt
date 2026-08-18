@@ -41,6 +41,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -48,6 +50,7 @@ import androidx.navigation.compose.rememberNavController
 import com.ytsaver.app.data.SavedMedia
 import com.ytsaver.app.license.LicenseGateScreen
 import com.ytsaver.app.license.LicenseManager
+import com.ytsaver.app.license.TrialBanner
 import com.ytsaver.app.ui.home.HomeScreen
 import com.ytsaver.app.ui.library.LibraryScreen
 import com.ytsaver.app.ui.nav.ContactBanner
@@ -136,6 +139,24 @@ private fun AppRoot() {
         return
     }
 
+    var unlocked by remember { mutableStateOf(LicenseManager.isUnlocked(context)) }
+    var showActivationDialog by remember { mutableStateOf(false) }
+
+    if (showActivationDialog) {
+        Dialog(
+            onDismissRequest = { showActivationDialog = false },
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            LicenseGateScreen(
+                onUnlocked = {
+                    unlocked = true
+                    showActivationDialog = false
+                },
+                onDismiss = { showActivationDialog = false }
+            )
+        }
+    }
+
     val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
     val batteryOptimizationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {}
 
@@ -152,6 +173,12 @@ private fun AppRoot() {
     val isInPip by PipState.isInPip.collectAsState()
 
     Column(modifier = Modifier.fillMaxSize()) {
+        if (!unlocked && !isInPip) {
+            TrialBanner(
+                daysLeft = LicenseManager.daysRemaining(context),
+                onActivateClick = { showActivationDialog = true }
+            )
+        }
         if (bannerVisible && !isInPip) {
             ContactBanner()
         }

@@ -41,6 +41,13 @@ object LicenseManager {
     fun requiresKey(context: Context): Boolean =
         isTrialExpired(context) && !isUnlocked(context)
 
+    /** Whole days left in the trial, 0 once it has expired. */
+    fun daysRemaining(context: Context): Int {
+        val elapsed = System.currentTimeMillis() - firstLaunchTime(context)
+        val remainingMillis = (TRIAL_DURATION_MILLIS - elapsed).coerceAtLeast(0)
+        return TimeUnit.MILLISECONDS.toDays(remainingMillis).toInt()
+    }
+
     fun tryUnlock(context: Context, enteredKey: String): Boolean {
         val valid = enteredKey.trim() == UNLOCK_KEY
         if (valid) {
