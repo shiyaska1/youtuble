@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ytsaver Activation Key Generator</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 40px;
+            background-color: #f4f4f9;
+        }
+        .container {
+            max-width: 500px;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+        }
+        label {
+            font-weight: bold;
+            display: block;
+            margin-top: 15px;
+        }
+        input {
+            width: 100%;
+            padding: 8px;
+            margin-top: 5px;
+            box-sizing: border-box;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        button {
+            margin-top: 15px;
+            width: 100%;
+            padding: 10px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        .result {
+            margin-top: 20px;
+            padding: 10px;
+            background: #e9ecef;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 18px;
+            font-weight: bold;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>ytsaver Activation Key Generator</h2>
+
+    <label for="secret">Secret Key:</label>
+    <input type="text" id="secret" value="ytsaver-secret-salt-2026">
+
+    <label for="deviceId">Device ID:</label>
+    <input type="text" id="deviceId" value="PASTE_DEVICE_ID">
+
+    <button onclick="generateToken()">Generate Token</button>
+
+    <div class="result" id="output">Click generate to see result</div>
+</div>
+
+<script>
+// Helper function to convert an ArrayBuffer to a hex string
+function bufToHex(buffer) {
+    return Array.from(new Uint8Array(buffer))
+        .map(b => b.toString(16).padStart(2, '0'))
+        .join('');
+}
+
+async function generateToken() {
+    const secretStr = document.getElementById('secret').value;
+    const deviceIdStr = document.getElementById('deviceId').value;
+    const outputDiv = document.getElementById('output');
+
+    try {
+        const encoder = new TextEncoder();
+        const keyData = encoder.encode(secretStr);
+        const messageData = encoder.encode(deviceIdStr);
+
+        // Import the raw secret key into the Web Crypto API framework
+        const cryptoKey = await crypto.subtle.importKey(
+            "raw",
+            keyData,
+            { name: "HMAC", hash: "SHA-256" },
+            false,
+            ["sign"]
+        );
+
+        // Compute the HMAC signature
+        const signatureBuffer = await crypto.subtle.sign(
+            "HMAC",
+            cryptoKey,
+            messageData
+        );
+
+        // Matches LicenseManager.expectedKeyFor(): hex -> first 16 chars -> uppercase
+        const fullHex = bufToHex(signatureBuffer);
+        const finalToken = fullHex.substring(0, 16).toUpperCase();
+
+        outputDiv.innerText = finalToken;
+        outputDiv.style.color = "#000";
+    } catch (error) {
+        outputDiv.innerText = "Error generating token";
+        outputDiv.style.color = "red";
+        console.error(error);
+    }
+}
+</script>
+
+</body>
+</html>
