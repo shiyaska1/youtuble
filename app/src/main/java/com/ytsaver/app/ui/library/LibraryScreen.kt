@@ -397,8 +397,8 @@ fun LibraryScreen(
                 )
             }
 
-            Box(modifier = Modifier.fillMaxSize()) {
-                LazyColumn(modifier = Modifier.fillMaxSize()) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                LazyColumn(modifier = Modifier.weight(1f)) {
                     items(state.items, key = { it.id }) { item ->
                         LibraryRow(
                             item = item,
@@ -428,7 +428,7 @@ fun LibraryScreen(
                     }
                 }
 
-                NowPlayingBar(modifier = Modifier.align(Alignment.BottomCenter))
+                NowPlayingBar()
             }
         }
     }
