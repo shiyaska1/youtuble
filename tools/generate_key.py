@@ -13,7 +13,7 @@ import hashlib
 import hmac
 import sys
 
-SECRET_SALT = "ytsaver-secret-salt-2026"
+SECRET_SALT = "POSB-change-this-secret-2024"
 
 
 def expected_key_for(device_id: str) -> str:

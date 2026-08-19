@@ -25,9 +25,10 @@ object LicenseManager {
 
     private val TRIAL_DURATION_MILLIS = TimeUnit.DAYS.toMillis(30)
 
-    // Shared secret between this app and tools/generate_key.py. Change it in
-    // both places together if you need to invalidate previously issued keys.
-    private const val SECRET_SALT = "ytsaver-secret-salt-2026"
+    // Shared secret between this app and tools/generate_key.py /
+    // tools/key_generator.html. Change it in all places together if you need
+    // to invalidate previously issued keys.
+    private const val SECRET_SALT = "POSB-change-this-secret-2024"
 
     private fun prefs(context: Context) =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
