@@ -1,5 +1,6 @@
 package com.ytsaver.app.ui.library
 
+import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -28,6 +29,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Videocam
@@ -64,6 +66,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
+import com.ytsaver.app.data.MediaAccess
 import com.ytsaver.app.data.MediaCategory
 import com.ytsaver.app.data.MediaType
 import com.ytsaver.app.data.SavedMedia
@@ -391,7 +394,8 @@ fun LibraryScreen(
                             onLongClick = { viewModel.enterSelection(item.id) },
                             onRename = { pendingRename = item },
                             onMoveCategory = { pendingMoveItem = item },
-                            onDelete = { pendingDelete = item }
+                            onDelete = { pendingDelete = item },
+                            onShare = { shareMedia(context, item) }
                         )
                     }
                 }
@@ -568,7 +572,8 @@ private fun LibraryRow(
     onLongClick: () -> Unit,
     onRename: () -> Unit,
     onMoveCategory: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    onShare: () -> Unit
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
 
@@ -614,6 +619,10 @@ private fun LibraryRow(
                 },
                 style = MaterialTheme.typography.bodySmall
             )
+        }
+
+        IconButton(onClick = onShare) {
+            Icon(Icons.Default.Share, contentDescription = "Share")
         }
 
         Box {
@@ -682,6 +691,17 @@ private fun NowPlayingBar(modifier: Modifier = Modifier) {
             }
         }
     }
+}
+
+private fun shareMedia(context: android.content.Context, item: SavedMedia) {
+    val uri = MediaAccess.shareUri(context, item.filePath)
+    val mimeType = if (item.type == MediaType.VIDEO) "video/*" else "audio/*"
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = mimeType
+        putExtra(Intent.EXTRA_STREAM, uri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    context.startActivity(Intent.createChooser(intent, "Share \"${item.caption}\""))
 }
 
 private fun formatSize(bytes: Long): String {

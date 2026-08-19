@@ -3,6 +3,7 @@ package com.ytsaver.app.data
 import android.content.Context
 import android.net.Uri
 import android.provider.MediaStore
+import androidx.core.content.FileProvider
 import java.io.File
 import java.io.InputStream
 
@@ -17,6 +18,16 @@ object MediaAccess {
 
     fun uri(path: String): Uri =
         if (isContentPath(path)) Uri.parse(path) else Uri.fromFile(File(path))
+
+    /**
+     * A URI safe to hand to another app (e.g. via ACTION_SEND). content://
+     * MediaStore URIs are already shareable as-is; plain file paths need
+     * wrapping in a FileProvider URI since a raw file:// URI would crash
+     * with FileUriExposedException on API 24+.
+     */
+    fun shareUri(context: Context, path: String): Uri =
+        if (isContentPath(path)) Uri.parse(path)
+        else FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", File(path))
 
     fun playableUriString(path: String): String =
         if (isContentPath(path)) path else File(path).toURI().toString()
