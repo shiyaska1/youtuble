@@ -171,7 +171,8 @@ class DownloadService : Service() {
                     thumbnailUrl = request.thumbnailUrl,
                     sizeBytes = sizeBytes,
                     durationSeconds = request.durationSeconds,
-                    createdAt = System.currentTimeMillis()
+                    createdAt = System.currentTimeMillis(),
+                    categoryId = request.categoryId
                 )
             )
             _progress.value = DownloadProgress(request.caption, sizeBytes, sizeBytes, done = true)
@@ -349,7 +350,8 @@ class DownloadService : Service() {
             fileExtension: String,
             mimeType: String,
             thumbnailUrl: String?,
-            durationSeconds: Long
+            durationSeconds: Long,
+            categoryId: Long? = null
         ) {
             val intent = Intent(context, DownloadService::class.java).apply {
                 putExtra(EXTRA_CAPTION, caption)
@@ -360,6 +362,7 @@ class DownloadService : Service() {
                 putExtra(EXTRA_MIME_TYPE, mimeType)
                 putExtra(EXTRA_THUMBNAIL, thumbnailUrl)
                 putExtra(EXTRA_DURATION, durationSeconds)
+                if (categoryId != null) putExtra(EXTRA_CATEGORY_ID, categoryId)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
@@ -376,6 +379,7 @@ class DownloadService : Service() {
         private const val EXTRA_MIME_TYPE = "mimeType"
         private const val EXTRA_THUMBNAIL = "thumbnail"
         private const val EXTRA_DURATION = "duration"
+        private const val EXTRA_CATEGORY_ID = "categoryId"
 
         private fun Intent.toDownloadRequest(): DownloadRequest? {
             val caption = getStringExtra(EXTRA_CAPTION) ?: return null
@@ -391,7 +395,8 @@ class DownloadService : Service() {
                 fileExtension = extension,
                 mimeType = getStringExtra(EXTRA_MIME_TYPE) ?: if (type == MediaType.VIDEO) "video/mp4" else "audio/mp4",
                 thumbnailUrl = getStringExtra(EXTRA_THUMBNAIL),
-                durationSeconds = getLongExtra(EXTRA_DURATION, 0)
+                durationSeconds = getLongExtra(EXTRA_DURATION, 0),
+                categoryId = if (hasExtra(EXTRA_CATEGORY_ID)) getLongExtra(EXTRA_CATEGORY_ID, 0) else null
             )
         }
     }
@@ -410,5 +415,6 @@ private data class DownloadRequest(
     val fileExtension: String,
     val mimeType: String,
     val thumbnailUrl: String?,
-    val durationSeconds: Long
+    val durationSeconds: Long,
+    val categoryId: Long? = null
 )

@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Pause
@@ -71,7 +72,9 @@ import com.ytsaver.app.data.MediaCategory
 import com.ytsaver.app.data.MediaType
 import com.ytsaver.app.data.SavedMedia
 import com.ytsaver.app.playback.PlayerController
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.DateFormat
 import java.util.Date
 
@@ -395,7 +398,8 @@ fun LibraryScreen(
                             onRename = { pendingRename = item },
                             onMoveCategory = { pendingMoveItem = item },
                             onDelete = { pendingDelete = item },
-                            onShare = { shareMedia(context, item) }
+                            onShare = { shareMedia(context, item) },
+                            onRedownload = { viewModel.redownload(item) }
                         )
                     }
                 }
@@ -573,14 +577,23 @@ private fun LibraryRow(
     onRename: () -> Unit,
     onMoveCategory: () -> Unit,
     onDelete: () -> Unit,
-    onShare: () -> Unit
+    onShare: () -> Unit,
+    onRedownload: () -> Unit
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    var missing by remember(item.id) { mutableStateOf(false) }
+    LaunchedEffect(item.filePath) {
+        missing = withContext(Dispatchers.IO) { !MediaAccess.exists(context, item.filePath) }
+    }
 
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+            .combinedClickable(
+                onClick = if (missing && !selectionMode) onRedownload else onClick,
+                onLongClick = onLongClick
+            )
             .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -607,18 +620,32 @@ private fun LibraryRow(
 
         Column(modifier = Modifier.weight(1f)) {
             Text(item.caption, maxLines = 2, style = MaterialTheme.typography.bodyLarge)
-            Text(
-                buildString {
-                    append(formatSize(item.sizeBytes))
-                    append(" • ")
-                    append(DateFormat.getDateInstance().format(Date(item.createdAt)))
-                    if (categoryName != null) {
+            if (missing) {
+                Text(
+                    "File missing — deleted outside the app",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            } else {
+                Text(
+                    buildString {
+                        append(formatSize(item.sizeBytes))
                         append(" • ")
-                        append(categoryName)
-                    }
-                },
-                style = MaterialTheme.typography.bodySmall
-            )
+                        append(DateFormat.getDateInstance().format(Date(item.createdAt)))
+                        if (categoryName != null) {
+                            append(" • ")
+                            append(categoryName)
+                        }
+                    },
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+        }
+
+        if (missing) {
+            IconButton(onClick = onRedownload) {
+                Icon(Icons.Default.Download, contentDescription = "Re-download")
+            }
         }
 
         IconButton(onClick = onShare) {

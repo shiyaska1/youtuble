@@ -16,6 +16,13 @@ object MediaAccess {
 
     private fun isContentPath(path: String) = path.startsWith("content://")
 
+    /** False if the file was deleted outside the app (e.g. from Gallery/a file manager). */
+    fun exists(context: Context, path: String): Boolean {
+        if (!isContentPath(path)) return File(path).exists()
+        return context.contentResolver.query(Uri.parse(path), null, null, null, null)
+            ?.use { it.moveToFirst() } ?: false
+    }
+
     fun uri(path: String): Uri =
         if (isContentPath(path)) Uri.parse(path) else Uri.fromFile(File(path))
 

@@ -10,6 +10,9 @@ import com.ytsaver.app.data.MediaAccess
 import com.ytsaver.app.data.MediaCategory
 import com.ytsaver.app.data.MediaType
 import com.ytsaver.app.data.SavedMedia
+import com.ytsaver.app.download.DownloadService
+import com.ytsaver.app.extract.DirectLinkFetcher
+import com.ytsaver.app.extract.YoutubeStreamFetcher
 import com.ytsaver.app.playback.PlayerController
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -189,6 +192,42 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
             _snackbarMessage.value = "Deleted ${toDelete.size} file(s)"
         }
         exitSelection()
+    }
+
+    /** Re-fetches [item]'s source link and saves it again — for when the file was deleted
+     *  outside the app (Gallery, a file manager, etc.) and playback would otherwise fail. */
+    fun redownload(item: SavedMedia) {
+        viewModelScope.launch {
+            dao.delete(item)
+
+            val result = if (DirectLinkFetcher.looksLikeYoutubeUrl(item.sourceUrl)) {
+                YoutubeStreamFetcher.fetch(item.sourceUrl)
+            } else {
+                DirectLinkFetcher.fetch(item.sourceUrl)
+            }
+
+            result.onSuccess { stream ->
+                val option = if (item.type == MediaType.VIDEO) stream.videoOption else stream.audioOption
+                if (option == null) {
+                    _snackbarMessage.value = "Couldn't find a matching ${item.type.name.lowercase()} stream to re-download"
+                    return@onSuccess
+                }
+                DownloadService.start(
+                    context = getApplication(),
+                    caption = item.caption,
+                    sourceUrl = stream.sourceUrl,
+                    streamUrl = option.streamUrl,
+                    type = item.type,
+                    fileExtension = option.fileExtension,
+                    mimeType = option.mimeType,
+                    thumbnailUrl = stream.thumbnailUrl ?: item.thumbnailUrl,
+                    durationSeconds = stream.durationSeconds,
+                    categoryId = item.categoryId
+                )
+            }.onFailure { e ->
+                _snackbarMessage.value = "Couldn't re-download: ${e.message ?: "link no longer works"}"
+            }
+        }
     }
 
     fun rename(item: SavedMedia, newCaption: String) {
