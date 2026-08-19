@@ -114,6 +114,7 @@ fun LibraryScreen(
     var pendingMoveItem by remember { mutableStateOf<SavedMedia?>(null) }
     var pendingMoveSelection by remember { mutableStateOf(false) }
     var pendingNewCategory by remember { mutableStateOf(false) }
+    var pendingRedownloadAll by remember { mutableStateOf(false) }
 
     val backupLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri: Uri? ->
         uri?.let {
@@ -175,6 +176,23 @@ fun LibraryScreen(
         )
     }
 
+    if (pendingRedownloadAll) {
+        AlertDialog(
+            onDismissRequest = { pendingRedownloadAll = false },
+            title = { Text("Re-download all ${state.items.size} file(s)?") },
+            text = { Text("Deletes each existing file and fetches a fresh copy from its original link, one at a time. This can't be undone.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.redownloadAll()
+                    pendingRedownloadAll = false
+                }) { Text("Re-download all") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingRedownloadAll = false }) { Text("Cancel") }
+            }
+        )
+    }
+
     pendingRename?.let { item ->
         RenameDialog(
             initialCaption = item.caption,
@@ -231,6 +249,12 @@ fun LibraryScreen(
             TopAppBar(
                 title = { Text("Library") },
                 actions = {
+                    IconButton(
+                        onClick = { pendingRedownloadAll = true },
+                        enabled = state.items.isNotEmpty()
+                    ) {
+                        Icon(Icons.Default.Download, contentDescription = "Re-download all")
+                    }
                     IconButton(onClick = { backupLauncher.launch(null) }) {
                         Icon(Icons.Default.CloudUpload, contentDescription = "Backup")
                     }
@@ -642,10 +666,8 @@ private fun LibraryRow(
             }
         }
 
-        if (missing) {
-            IconButton(onClick = onRedownload) {
-                Icon(Icons.Default.Download, contentDescription = "Re-download")
-            }
+        IconButton(onClick = onRedownload) {
+            Icon(Icons.Default.Download, contentDescription = "Re-download")
         }
 
         IconButton(onClick = onShare) {

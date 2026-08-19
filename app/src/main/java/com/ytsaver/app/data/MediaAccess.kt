@@ -2,6 +2,7 @@ package com.ytsaver.app.data
 
 import android.content.Context
 import android.net.Uri
+import android.os.Build
 import android.provider.MediaStore
 import androidx.core.content.FileProvider
 import java.io.File
@@ -16,11 +17,19 @@ object MediaAccess {
 
     private fun isContentPath(path: String) = path.startsWith("content://")
 
-    /** False if the file was deleted outside the app (e.g. from Gallery/a file manager). */
+    /**
+     * False if the file was deleted outside the app (e.g. from Gallery/a file
+     * manager). Actually opens the content, rather than just checking that
+     * the MediaStore row is still there: several OEM Gallery apps (MIUI,
+     * ColorOS, ...) move/delete the physical file on their own "Recently
+     * Deleted" without cleaning up the MediaStore row, leaving a ghost entry
+     * that would otherwise look like it still exists.
+     */
     fun exists(context: Context, path: String): Boolean {
         if (!isContentPath(path)) return File(path).exists()
-        return context.contentResolver.query(Uri.parse(path), null, null, null, null)
-            ?.use { it.moveToFirst() } ?: false
+        return runCatching {
+            context.contentResolver.openInputStream(Uri.parse(path))?.use { true } ?: false
+        }.getOrDefault(false)
     }
 
     fun uri(path: String): Uri =

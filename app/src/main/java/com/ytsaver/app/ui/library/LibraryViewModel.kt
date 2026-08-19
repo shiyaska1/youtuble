@@ -194,39 +194,57 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
         exitSelection()
     }
 
-    /** Re-fetches [item]'s source link and saves it again — for when the file was deleted
-     *  outside the app (Gallery, a file manager, etc.) and playback would otherwise fail. */
+    /** Re-fetches [item]'s source link and saves it again — deletes the existing file first
+     *  if it's still there (e.g. to force a fresh copy), and is also how a file that was
+     *  deleted outside the app (Gallery, a file manager, etc.) gets recovered. The new copy
+     *  gets a fresh createdAt, so with the default "Newest first" sort it lands at the top,
+     *  replacing the old row (which is deleted). */
     fun redownload(item: SavedMedia) {
+        viewModelScope.launch { redownloadOne(item) }
+    }
+
+    /** Re-downloads every saved item, one at a time (so it doesn't hammer the source site
+     *  with a burst of simultaneous requests). */
+    fun redownloadAll() {
         viewModelScope.launch {
-            dao.delete(item)
-
-            val result = if (DirectLinkFetcher.looksLikeYoutubeUrl(item.sourceUrl)) {
-                YoutubeStreamFetcher.fetch(item.sourceUrl)
-            } else {
-                DirectLinkFetcher.fetch(item.sourceUrl)
+            val items = dao.observeAll().first()
+            _snackbarMessage.value = "Re-downloading ${items.size} file(s)…"
+            for (item in items) {
+                redownloadOne(item)
             }
+        }
+    }
 
-            result.onSuccess { stream ->
-                val option = if (item.type == MediaType.VIDEO) stream.videoOption else stream.audioOption
-                if (option == null) {
-                    _snackbarMessage.value = "Couldn't find a matching ${item.type.name.lowercase()} stream to re-download"
-                    return@onSuccess
-                }
-                DownloadService.start(
-                    context = getApplication(),
-                    caption = item.caption,
-                    sourceUrl = stream.sourceUrl,
-                    streamUrl = option.streamUrl,
-                    type = item.type,
-                    fileExtension = option.fileExtension,
-                    mimeType = option.mimeType,
-                    thumbnailUrl = stream.thumbnailUrl ?: item.thumbnailUrl,
-                    durationSeconds = stream.durationSeconds,
-                    categoryId = item.categoryId
-                )
-            }.onFailure { e ->
-                _snackbarMessage.value = "Couldn't re-download: ${e.message ?: "link no longer works"}"
+    private suspend fun redownloadOne(item: SavedMedia) {
+        MediaAccess.delete(getApplication(), item.filePath)
+        dao.delete(item)
+
+        val result = if (DirectLinkFetcher.looksLikeYoutubeUrl(item.sourceUrl)) {
+            YoutubeStreamFetcher.fetch(item.sourceUrl)
+        } else {
+            DirectLinkFetcher.fetch(item.sourceUrl)
+        }
+
+        result.onSuccess { stream ->
+            val option = if (item.type == MediaType.VIDEO) stream.videoOption else stream.audioOption
+            if (option == null) {
+                _snackbarMessage.value = "Couldn't find a matching ${item.type.name.lowercase()} stream for \"${item.caption}\""
+                return@onSuccess
             }
+            DownloadService.start(
+                context = getApplication(),
+                caption = item.caption,
+                sourceUrl = stream.sourceUrl,
+                streamUrl = option.streamUrl,
+                type = item.type,
+                fileExtension = option.fileExtension,
+                mimeType = option.mimeType,
+                thumbnailUrl = stream.thumbnailUrl ?: item.thumbnailUrl,
+                durationSeconds = stream.durationSeconds,
+                categoryId = item.categoryId
+            )
+        }.onFailure { e ->
+            _snackbarMessage.value = "Couldn't re-download \"${item.caption}\": ${e.message ?: "link no longer works"}"
         }
     }
 
