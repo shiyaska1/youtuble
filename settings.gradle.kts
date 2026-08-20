@@ -17,3 +17,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "YTSaver"
 include(":app")
+include(":attendance")
