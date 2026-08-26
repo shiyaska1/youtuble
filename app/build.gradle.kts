@@ -26,6 +26,7 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+        isCoreLibraryDesugaringEnabled = true
     }
     kotlinOptions {
         jvmTarget = "17"
@@ -84,4 +85,8 @@ dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     // DocumentFile API for the backup/restore folder picker (SAF)
     implementation("androidx.documentfile:documentfile:1.0.1")
+
+    // Backports newer java.* APIs (e.g. URLDecoder.decode(String, Charset),
+    // used internally by NewPipeExtractor) to devices below API 33.
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
 }
