@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.List
+import androidx.compose.material.icons.filled.SmartDisplay
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -46,6 +47,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.ytsaver.app.data.SavedMedia
+import com.ytsaver.app.ui.browser.YoutubeBrowserScreen
 import com.ytsaver.app.license.LicenseGateScreen
 import com.ytsaver.app.license.LicenseManager
 import com.ytsaver.app.ui.home.HomeScreen
@@ -200,6 +202,12 @@ private fun MainScaffold(onOpenVideo: (List<SavedMedia>, Int, Boolean) -> Unit) 
                 NavigationBarItem(
                     selected = selectedTab == 1,
                     onClick = { selectedTab = 1 },
+                    icon = { Icon(Icons.Default.SmartDisplay, contentDescription = "YouTube") },
+                    label = { Text("YouTube") }
+                )
+                NavigationBarItem(
+                    selected = selectedTab == 2,
+                    onClick = { selectedTab = 2 },
                     icon = { Icon(Icons.Default.List, contentDescription = "Library") },
                     label = { Text("Library") }
                 )
@@ -209,6 +217,7 @@ private fun MainScaffold(onOpenVideo: (List<SavedMedia>, Int, Boolean) -> Unit) 
         Box(modifier = Modifier.fillMaxSize().padding(padding)) {
             when (selectedTab) {
                 0 -> HomeScreen()
+                1 -> YoutubeBrowserScreen()
                 else -> LibraryScreen(onOpenVideo = onOpenVideo)
             }
         }
