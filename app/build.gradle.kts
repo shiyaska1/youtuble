@@ -68,8 +68,21 @@ dependencies {
     // Networking
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
-    // YouTube stream extraction (open-source, same engine NewPipe uses)
-    implementation("com.github.TeamNewPipe:NewPipeExtractor:v0.26.5")
+    // YouTube stream extraction (open-source, same engine NewPipe uses).
+    // Using a locally patched copy of the jar instead of the Maven coordinate:
+    // one class (Utils.class) was binary-patched to stop calling a
+    // URLDecoder/URLEncoder overload that only exists on Android 13+, which
+    // crashed extraction on older devices. Only that one method's bytecode
+    // was changed; everything else is untouched. Its own transitive
+    // dependencies (normally pulled in automatically) are declared explicitly
+    // below since a local file() dependency doesn't carry a POM.
+    implementation(files("libs/NewPipeExtractor-v0.26.5-patched.jar"))
+    implementation("com.github.TeamNewPipe:nanojson:e9d656ddb49a412a5a0a5d5ef20ca7ef09549996")
+    implementation("org.jsoup:jsoup:1.22.2")
+    implementation("com.google.code.findbugs:jsr305:3.0.2")
+    implementation("com.google.protobuf:protobuf-javalite:4.35.1")
+    implementation("org.mozilla:rhino:1.8.1")
+    implementation("org.mozilla:rhino-engine:1.8.1")
 
     // Playback (video + audio) for offline files. media3-session powers a
     // background-capable MediaSessionService so audio keeps playing when the
@@ -88,5 +101,5 @@ dependencies {
 
     // Backports newer java.* APIs (e.g. URLDecoder.decode(String, Charset),
     // used internally by NewPipeExtractor) to devices below API 33.
-    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
 }
