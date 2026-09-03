@@ -2,4 +2,7 @@
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
     <external-files-path name="external_files" path="." />
     <files-path name="internal_files" path="." />
+    <!-- Covers the public Pictures/Downloads folders (scanned pages/PDFs on API<29 devices,
+         which are saved there directly rather than via MediaStore). -->
+    <external-path name="external_storage_root" path="." />
 </paths>

@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.DocumentScanner
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.SmartDisplay
 import androidx.compose.material3.Icon
@@ -55,6 +56,7 @@ import com.ytsaver.app.license.LicenseGateScreen
 import com.ytsaver.app.license.LicenseManager
 import com.ytsaver.app.ui.home.HomeScreen
 import com.ytsaver.app.ui.library.LibraryScreen
+import com.ytsaver.app.ui.scan.ScanScreen
 import com.ytsaver.app.ui.nav.ContactBanner
 import com.ytsaver.app.ui.player.PipState
 import com.ytsaver.app.ui.player.PlayerScreen
@@ -227,6 +229,12 @@ private fun MainScaffold(onOpenVideo: (List<SavedMedia>, Int, Boolean) -> Unit) 
                     icon = { Icon(Icons.Default.List, contentDescription = "Library") },
                     label = { Text("Library") }
                 )
+                NavigationBarItem(
+                    selected = selectedTab == 3,
+                    onClick = { selectedTab = 3 },
+                    icon = { Icon(Icons.Default.DocumentScanner, contentDescription = "Scan") },
+                    label = { Text("Scan") }
+                )
             }
         }
     ) { padding ->
@@ -234,7 +242,8 @@ private fun MainScaffold(onOpenVideo: (List<SavedMedia>, Int, Boolean) -> Unit) 
             when (selectedTab) {
                 0 -> HomeScreen()
                 1 -> YoutubeBrowserScreen()
-                else -> LibraryScreen(onOpenVideo = onOpenVideo)
+                2 -> LibraryScreen(onOpenVideo = onOpenVideo)
+                else -> ScanScreen()
             }
         }
     }
