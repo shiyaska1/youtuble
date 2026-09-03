@@ -217,6 +217,10 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private suspend fun redownloadOne(item: SavedMedia) {
+        if (item.type == MediaType.IMAGE) {
+            _snackbarMessage.value = "Scanned pages aren't from a link, so they can't be re-downloaded"
+            return
+        }
         MediaAccess.delete(getApplication(), item.filePath)
         dao.delete(item)
 

@@ -5,7 +5,7 @@ import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
 
-enum class MediaType { VIDEO, AUDIO }
+enum class MediaType { VIDEO, AUDIO, IMAGE }
 
 /**
  * One row per file saved to phone storage. [filePath] points at the actual

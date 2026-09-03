@@ -62,6 +62,12 @@ dependencies {
     // on launch and whenever the app returns from the background.
     implementation("androidx.biometric:biometric:1.1.0")
 
+    // In-app camera for the page-scan capture screen (one tap per page).
+    implementation("androidx.camera:camera-core:1.3.4")
+    implementation("androidx.camera:camera-camera2:1.3.4")
+    implementation("androidx.camera:camera-lifecycle:1.3.4")
+    implementation("androidx.camera:camera-view:1.3.4")
+
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     // .await() on the ListenableFuture that MediaController.Builder returns

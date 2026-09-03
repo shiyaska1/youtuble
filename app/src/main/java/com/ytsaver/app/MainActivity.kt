@@ -56,6 +56,7 @@ import com.ytsaver.app.license.LicenseGateScreen
 import com.ytsaver.app.license.LicenseManager
 import com.ytsaver.app.ui.home.HomeScreen
 import com.ytsaver.app.ui.library.LibraryScreen
+import com.ytsaver.app.ui.scan.ImageViewerScreen
 import com.ytsaver.app.ui.scan.ScanScreen
 import com.ytsaver.app.ui.nav.ContactBanner
 import com.ytsaver.app.ui.player.PipState
@@ -168,6 +169,7 @@ private fun AppRoot(activity: FragmentActivity) {
 
     val navController = rememberNavController()
     var videoRequest by remember { mutableStateOf<VideoQueueRequest?>(null) }
+    var imageToView by remember { mutableStateOf<String?>(null) }
     var bannerVisible by remember { mutableStateOf(true) }
     val isInPip by PipState.isInPip.collectAsState()
 
@@ -182,8 +184,17 @@ private fun AppRoot(activity: FragmentActivity) {
                         onOpenVideo = { queue, startIndex, loop ->
                             videoRequest = VideoQueueRequest(queue, startIndex, loop)
                             navController.navigate("player")
+                        },
+                        onOpenImage = { filePath ->
+                            imageToView = filePath
+                            navController.navigate("image")
                         }
                     )
+                }
+                composable("image") {
+                    imageToView?.let { path ->
+                        ImageViewerScreen(filePath = path, onBack = { navController.popBackStack() })
+                    }
                 }
                 composable("player") {
                     val request = videoRequest
@@ -205,7 +216,10 @@ private fun AppRoot(activity: FragmentActivity) {
 private data class VideoQueueRequest(val queue: List<SavedMedia>, val startIndex: Int, val loop: Boolean)
 
 @Composable
-private fun MainScaffold(onOpenVideo: (List<SavedMedia>, Int, Boolean) -> Unit) {
+private fun MainScaffold(
+    onOpenVideo: (List<SavedMedia>, Int, Boolean) -> Unit,
+    onOpenImage: (String) -> Unit
+) {
     var selectedTab by remember { mutableStateOf(0) }
 
     Scaffold(
@@ -242,7 +256,7 @@ private fun MainScaffold(onOpenVideo: (List<SavedMedia>, Int, Boolean) -> Unit) 
             when (selectedTab) {
                 0 -> HomeScreen()
                 1 -> YoutubeBrowserScreen()
-                2 -> LibraryScreen(onOpenVideo = onOpenVideo)
+                2 -> LibraryScreen(onOpenVideo = onOpenVideo, onOpenImage = onOpenImage)
                 else -> ScanScreen()
             }
         }

@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Pause
@@ -101,6 +102,7 @@ private val MIN_AGE_OPTIONS = listOf(
 @Composable
 fun LibraryScreen(
     onOpenVideo: (queue: List<SavedMedia>, startIndex: Int, loop: Boolean) -> Unit,
+    onOpenImage: (filePath: String) -> Unit,
     viewModel: LibraryViewModel = viewModel()
 ) {
     val state by viewModel.uiState.collectAsState()
@@ -412,6 +414,7 @@ fun LibraryScreen(
                                         val sameType = state.items.filter { it.type == MediaType.VIDEO }
                                         onOpenVideo(sameType, sameType.indexOf(item).coerceAtLeast(0), false)
                                     }
+                                    item.type == MediaType.IMAGE -> onOpenImage(item.filePath)
                                     else -> {
                                         val sameType = state.items.filter { it.type == MediaType.AUDIO }
                                         viewModel.playAudioQueue(sameType, sameType.indexOf(item).coerceAtLeast(0), false)
@@ -636,7 +639,11 @@ private fun LibraryRow(
             )
         } else {
             Icon(
-                imageVector = if (item.type == MediaType.VIDEO) Icons.Default.Videocam else Icons.Default.MusicNote,
+                imageVector = when (item.type) {
+                    MediaType.VIDEO -> Icons.Default.Videocam
+                    MediaType.IMAGE -> Icons.Default.Image
+                    MediaType.AUDIO -> Icons.Default.MusicNote
+                },
                 contentDescription = null,
                 modifier = Modifier.size(40.dp)
             )
@@ -744,7 +751,11 @@ private fun NowPlayingBar(modifier: Modifier = Modifier) {
 
 private fun shareMedia(context: android.content.Context, item: SavedMedia) {
     val uri = MediaAccess.shareUri(context, item.filePath)
-    val mimeType = if (item.type == MediaType.VIDEO) "video/*" else "audio/*"
+    val mimeType = when (item.type) {
+        MediaType.VIDEO -> "video/*"
+        MediaType.IMAGE -> "image/*"
+        MediaType.AUDIO -> "audio/*"
+    }
     val intent = Intent(Intent.ACTION_SEND).apply {
         type = mimeType
         putExtra(Intent.EXTRA_STREAM, uri)

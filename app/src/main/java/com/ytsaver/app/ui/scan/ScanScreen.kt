@@ -1,9 +1,8 @@
 package com.ytsaver.app.ui.scan
 
 import android.content.Intent
-import android.net.Uri
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,17 +10,25 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.PictureAsPdf
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -29,134 +36,149 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import com.ytsaver.app.scan.PageLocation
-import com.ytsaver.app.scan.PageScanExtractor
+import coil.compose.AsyncImage
+import com.ytsaver.app.scan.ScanFileStore
+import com.ytsaver.app.scan.ScanFolder
 import com.ytsaver.app.scan.ScanPdfBuilder
-import com.ytsaver.app.scan.ScanProgress
 import com.ytsaver.app.scan.shareUri
 import kotlinx.coroutines.launch
 
-private sealed class ScanState {
-    data object Idle : ScanState()
-    data class Running(val progress: ScanProgress) : ScanState()
-    data class Done(val pages: List<PageLocation>) : ScanState()
-    data class Failed(val message: String) : ScanState()
+private sealed class ScanScreenState {
+    data object List : ScanScreenState()
+    data object Capturing : ScanScreenState()
 }
 
 /**
- * "Photocopy from video": pick a video of yourself flipping through a book
- * page by page, and get back one clean JPG per page - no per-page photos.
+ * "Photocopy from camera": tap the shutter once per page (like Google
+ * Drive/CamScanner-style scanning) instead of photographing pages one by
+ * one in the regular camera app. Past scan sessions show up below, each
+ * with Share and PDF actions for the whole folder.
  */
 @Composable
 fun ScanScreen() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
-    var state by remember { mutableStateOf<ScanState>(ScanState.Idle) }
-    var building by remember { mutableStateOf(false) }
+    var screenState by remember { mutableStateOf<ScanScreenState>(ScanScreenState.List) }
+    var folders by remember { mutableStateOf(ScanFileStore.listFolders(context)) }
+    var buildingPdfFor by remember { mutableStateOf<String?>(null) }
 
-    val pickVideo = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
-        if (uri != null) {
-            state = ScanState.Running(ScanProgress(0, 1, 0))
-            scope.launch {
-                val result = PageScanExtractor.extractPages(context, uri) { progress ->
-                    state = ScanState.Running(progress)
+    fun refresh() {
+        folders = ScanFileStore.listFolders(context)
+    }
+
+    when (screenState) {
+        is ScanScreenState.Capturing -> {
+            PhotoCaptureScreen(onDone = {
+                screenState = ScanScreenState.List
+                refresh()
+            })
+        }
+        is ScanScreenState.List -> {
+            Box(modifier = Modifier.fillMaxSize()) {
+                Column(modifier = Modifier.fillMaxSize()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(16.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Scans", style = MaterialTheme.typography.titleLarge)
+                        Button(onClick = { screenState = ScanScreenState.Capturing }) {
+                            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.padding(end = 4.dp))
+                            Text("New scan")
+                        }
+                    }
+
+                    if (folders.isEmpty()) {
+                        Box(modifier = Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
+                            Text(
+                                "Tap \"New scan\" to photograph a book page by page - each page becomes its own photo, saved to the Library under \"CAMERA\".",
+                                textAlign = TextAlign.Center,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+                    } else {
+                        LazyColumn {
+                            items(folders, key = { it.folderName }) { folder ->
+                                ScanFolderRow(
+                                    folder = folder,
+                                    building = buildingPdfFor == folder.folderName,
+                                    onShare = {
+                                        val images = ScanFileStore.listImagesInFolder(context, folder.folderName)
+                                        val uris = ArrayList(images.map { it.shareUri(context) })
+                                        val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+                                            type = "image/jpeg"
+                                            putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+                                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                        }
+                                        context.startActivity(Intent.createChooser(intent, "Share ${folder.folderName}"))
+                                    },
+                                    onMakePdf = {
+                                        buildingPdfFor = folder.folderName
+                                        scope.launch {
+                                            val images = ScanFileStore.listImagesInFolder(context, folder.folderName)
+                                            val result = ScanPdfBuilder.buildPdf(context, images, "${folder.folderName}.pdf")
+                                            buildingPdfFor = null
+                                            val message = result.fold(
+                                                onSuccess = { "Saved as PDF to Downloads/YTSaver" },
+                                                onFailure = { e -> "Couldn't build PDF: ${e.message}" }
+                                            )
+                                            snackbarHostState.showSnackbar(message)
+                                        }
+                                    }
+                                )
+                            }
+                        }
+                    }
                 }
-                state = result.fold(
-                    onSuccess = { pages -> ScanState.Done(pages) },
-                    onFailure = { e -> ScanState.Failed(e.message ?: "Couldn't process that video") }
-                )
+                SnackbarHost(snackbarHostState, modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp))
             }
         }
     }
+}
 
-    Box(modifier = Modifier.fillMaxSize()) {
-        Box(modifier = Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(
-                    "Video → Page Photos",
-                    style = MaterialTheme.typography.titleLarge,
-                    textAlign = TextAlign.Center
-                )
-                Text(
-                    "Pick a video of you flipping through a book, one page at a time. " +
-                        "Each page you hold still for a moment gets saved as its own JPG - the blurry " +
-                        "flipping in between is skipped automatically.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.padding(top = 8.dp, bottom = 16.dp)
-                )
-
-                when (val s = state) {
-                    is ScanState.Idle -> {
-                        Button(onClick = { pickVideo.launch("video/*") }) {
-                            Text("Pick a video")
-                        }
+@Composable
+private fun ScanFolderRow(
+    folder: ScanFolder,
+    building: Boolean,
+    onShare: () -> Unit,
+    onMakePdf: () -> Unit
+) {
+    val context = LocalContext.current
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        if (folder.thumbnail != null) {
+            AsyncImage(
+                model = folder.thumbnail.let { loc ->
+                    when (loc) {
+                        is com.ytsaver.app.scan.PageLocation.MediaStoreUri -> loc.uri
+                        is com.ytsaver.app.scan.PageLocation.LegacyFile -> loc.file
                     }
-                    is ScanState.Running -> {
-                        val fraction = if (s.progress.totalMs > 0) {
-                            (s.progress.sampledMs.toFloat() / s.progress.totalMs).coerceIn(0f, 1f)
-                        } else 0f
-                        CircularProgressIndicator(modifier = Modifier.padding(bottom = 12.dp))
-                        LinearProgressIndicator(
-                            progress = { fraction },
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        Text(
-                            "Scanning… ${s.progress.pagesFound} page(s) found so far",
-                            modifier = Modifier.padding(top = 8.dp)
-                        )
-                    }
-                    is ScanState.Done -> {
-                        Text("Saved ${s.pages.size} page(s) to Pictures/YTSaver.")
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Button(
-                                enabled = !building,
-                                onClick = {
-                                    building = true
-                                    scope.launch {
-                                        val fileName = "Scan-${System.currentTimeMillis()}.pdf"
-                                        val result = ScanPdfBuilder.buildPdf(context, s.pages, fileName)
-                                        building = false
-                                        val message = result.fold(
-                                            onSuccess = { "Saved as PDF to Downloads/YTSaver" },
-                                            onFailure = { e -> "Couldn't build PDF: ${e.message}" }
-                                        )
-                                        snackbarHostState.showSnackbar(message)
-                                    }
-                                }
-                            ) {
-                                Text("Save as PDF")
-                            }
-                            OutlinedButton(onClick = {
-                                val uris = ArrayList(s.pages.map { it.shareUri(context) })
-                                val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
-                                    type = "image/jpeg"
-                                    putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
-                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                }
-                                context.startActivity(Intent.createChooser(intent, "Share pages"))
-                            }) {
-                                Text("Share pages")
-                            }
-                        }
-                        Button(onClick = { state = ScanState.Idle }, modifier = Modifier.padding(top = 12.dp)) {
-                            Text("Scan another video")
-                        }
-                    }
-                    is ScanState.Failed -> {
-                        Text(s.message, color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center)
-                        Button(onClick = { state = ScanState.Idle }, modifier = Modifier.padding(top = 16.dp)) {
-                            Text("Try again")
-                        }
-                    }
-                }
+                },
+                contentDescription = null,
+                modifier = Modifier.size(56.dp).clip(RoundedCornerShape(6.dp))
+            )
+        }
+        Column(modifier = Modifier.weight(1f)) {
+            Text(folder.folderName, style = MaterialTheme.typography.bodyLarge)
+            Text("${folder.imageCount} page(s)", style = MaterialTheme.typography.bodySmall)
+        }
+        if (building) {
+            CircularProgressIndicator(modifier = Modifier.size(24.dp))
+        } else {
+            IconButton(onClick = onMakePdf) {
+                Icon(Icons.Default.PictureAsPdf, contentDescription = "Save as PDF")
             }
         }
-        SnackbarHost(snackbarHostState, modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp))
+        IconButton(onClick = onShare) {
+            Icon(Icons.Default.Share, contentDescription = "Share pages")
+        }
     }
 }
