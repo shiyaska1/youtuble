@@ -12,6 +12,7 @@ import com.ytsaver.app.data.MediaType
 import com.ytsaver.app.data.SavedMedia
 import com.ytsaver.app.download.DownloadService
 import com.ytsaver.app.extract.DirectLinkFetcher
+import com.ytsaver.app.extract.GenericVideoFetcher
 import com.ytsaver.app.extract.YoutubeStreamFetcher
 import com.ytsaver.app.playback.PlayerController
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -222,7 +223,7 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
         val result = if (DirectLinkFetcher.looksLikeYoutubeUrl(item.sourceUrl)) {
             YoutubeStreamFetcher.fetch(item.sourceUrl)
         } else {
-            DirectLinkFetcher.fetch(item.sourceUrl)
+            DirectLinkFetcher.fetch(item.sourceUrl).recoverCatching { GenericVideoFetcher.fetch(item.sourceUrl).getOrThrow() }
         }
 
         result.onSuccess { stream ->
@@ -241,7 +242,8 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
                 mimeType = option.mimeType,
                 thumbnailUrl = stream.thumbnailUrl ?: item.thumbnailUrl,
                 durationSeconds = stream.durationSeconds,
-                categoryId = item.categoryId
+                categoryId = item.categoryId,
+                referer = option.referer
             )
         }.onFailure { e ->
             _snackbarMessage.value = "Couldn't re-download \"${item.caption}\": ${e.message ?: "link no longer works"}"

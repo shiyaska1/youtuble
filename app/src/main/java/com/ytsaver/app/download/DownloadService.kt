@@ -125,7 +125,7 @@ class DownloadService : Service() {
 
             // A small synchronous probe learns the real file size (from Content-Range)
             // before splitting the rest into chunks fetched concurrently.
-            val (totalBytes, probedBytes) = probeAndWriteFirstBytes(resolvedTarget, request.streamUrl)
+            val (totalBytes, probedBytes) = probeAndWriteFirstBytes(resolvedTarget, request.streamUrl, request.referer)
             val bytesDone = AtomicLong(probedBytes)
             val lastNotify = AtomicLong(0)
             _progress.value = DownloadProgress(request.caption, bytesDone.get(), totalBytes)
@@ -133,7 +133,7 @@ class DownloadService : Service() {
             buildRanges(probedBytes, totalBytes, CHUNK_SIZE_BYTES).asFlow()
                 .flatMapMerge(concurrency = PARALLEL_CONNECTIONS) { range ->
                     flow {
-                        downloadRangeInto(resolvedTarget, request.streamUrl, range) { justRead ->
+                        downloadRangeInto(resolvedTarget, request.streamUrl, request.referer, range) { justRead ->
                             val done = bytesDone.addAndGet(justRead.toLong())
                             _progress.value = DownloadProgress(request.caption, done, totalBytes)
                             val now = System.currentTimeMillis()
@@ -193,10 +193,11 @@ class DownloadService : Service() {
     }
 
     /** Fetches the first chunk synchronously so we learn the real file size before parallelizing. */
-    private fun probeAndWriteFirstBytes(target: DownloadTarget, url: String): Pair<Long, Long> {
+    private fun probeAndWriteFirstBytes(target: DownloadTarget, url: String, referer: String?): Pair<Long, Long> {
         val httpRequest = Request.Builder()
             .url(url)
             .header("Range", "bytes=0-${PROBE_BYTES - 1}")
+            .applyRefererHeaders(referer)
             .build()
         client.newCall(httpRequest).execute().use { response ->
             if (!response.isSuccessful) throw IOException("Server returned ${response.code}")
@@ -209,10 +210,11 @@ class DownloadService : Service() {
         }
     }
 
-    private fun downloadRangeInto(target: DownloadTarget, url: String, range: LongRange, onBytes: (Int) -> Unit) {
+    private fun downloadRangeInto(target: DownloadTarget, url: String, referer: String?, range: LongRange, onBytes: (Int) -> Unit) {
         val httpRequest = Request.Builder()
             .url(url)
             .header("Range", "bytes=${range.first}-${range.last}")
+            .applyRefererHeaders(referer)
             .build()
         client.newCall(httpRequest).execute().use { response ->
             if (!response.isSuccessful) throw IOException("Server returned ${response.code}")
@@ -248,6 +250,14 @@ class DownloadService : Service() {
                 }
             }
         }
+    }
+
+    private fun Request.Builder.applyRefererHeaders(referer: String?): Request.Builder {
+        if (referer != null) {
+            header("Referer", referer)
+            header("User-Agent", DOWNLOAD_USER_AGENT)
+        }
+        return this
     }
 
     private fun buildRanges(start: Long, total: Long, chunkSize: Long): List<LongRange> {
@@ -349,6 +359,9 @@ class DownloadService : Service() {
         private const val CHUNK_SIZE_BYTES = 5L * 1024 * 1024
         private const val PARALLEL_CONNECTIONS = 4
 
+        private const val DOWNLOAD_USER_AGENT =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+
         private val _progress = MutableStateFlow<DownloadProgress?>(null)
         val progress = _progress.asStateFlow()
 
@@ -369,7 +382,8 @@ class DownloadService : Service() {
             mimeType: String,
             thumbnailUrl: String?,
             durationSeconds: Long,
-            categoryId: Long? = null
+            categoryId: Long? = null,
+            referer: String? = null
         ) {
             val intent = Intent(context, DownloadService::class.java).apply {
                 putExtra(EXTRA_CAPTION, caption)
@@ -381,6 +395,7 @@ class DownloadService : Service() {
                 putExtra(EXTRA_THUMBNAIL, thumbnailUrl)
                 putExtra(EXTRA_DURATION, durationSeconds)
                 if (categoryId != null) putExtra(EXTRA_CATEGORY_ID, categoryId)
+                if (referer != null) putExtra(EXTRA_REFERER, referer)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
@@ -398,6 +413,7 @@ class DownloadService : Service() {
         private const val EXTRA_THUMBNAIL = "thumbnail"
         private const val EXTRA_DURATION = "duration"
         private const val EXTRA_CATEGORY_ID = "categoryId"
+        private const val EXTRA_REFERER = "referer"
 
         private fun Intent.toDownloadRequest(): DownloadRequest? {
             val caption = getStringExtra(EXTRA_CAPTION) ?: return null
@@ -414,7 +430,8 @@ class DownloadService : Service() {
                 mimeType = getStringExtra(EXTRA_MIME_TYPE) ?: if (type == MediaType.VIDEO) "video/mp4" else "audio/mp4",
                 thumbnailUrl = getStringExtra(EXTRA_THUMBNAIL),
                 durationSeconds = getLongExtra(EXTRA_DURATION, 0),
-                categoryId = if (hasExtra(EXTRA_CATEGORY_ID)) getLongExtra(EXTRA_CATEGORY_ID, 0) else null
+                categoryId = if (hasExtra(EXTRA_CATEGORY_ID)) getLongExtra(EXTRA_CATEGORY_ID, 0) else null,
+                referer = getStringExtra(EXTRA_REFERER)
             )
         }
     }
@@ -434,5 +451,6 @@ private data class DownloadRequest(
     val mimeType: String,
     val thumbnailUrl: String?,
     val durationSeconds: Long,
-    val categoryId: Long? = null
+    val categoryId: Long? = null,
+    val referer: String? = null
 )

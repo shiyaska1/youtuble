@@ -8,7 +8,10 @@ data class MediaOption(
     val streamUrl: String,
     val fileExtension: String,
     val mimeType: String,
-    val label: String
+    val label: String,
+    /** Some sites' CDNs reject a video request with no/wrong Referer (hotlink protection);
+     *  set to the page the stream was found on so the actual download request carries it. */
+    val referer: String? = null
 )
 
 data class FetchedStream(

@@ -53,7 +53,14 @@ dependencies {
     implementation("androidx.navigation:navigation-compose:2.7.7")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.1")
+    // Detects when the whole app goes to the background/foreground (used by
+    // the privacy app-lock to know when to re-lock).
+    implementation("androidx.lifecycle:lifecycle-process:2.8.1")
     debugImplementation("androidx.compose.ui:ui-tooling")
+
+    // Privacy app-lock: fingerprint/face/PIN/pattern/password prompt shown
+    // on launch and whenever the app returns from the background.
+    implementation("androidx.biometric:biometric:1.1.0")
 
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")

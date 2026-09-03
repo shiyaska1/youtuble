@@ -113,7 +113,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             fileExtension = option.fileExtension,
             mimeType = option.mimeType,
             thumbnailUrl = status.stream.thumbnailUrl,
-            durationSeconds = status.stream.durationSeconds
+            durationSeconds = status.stream.durationSeconds,
+            referer = option.referer
         )
         removeFromQueue(id)
     }

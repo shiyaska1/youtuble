@@ -4,6 +4,7 @@ import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.os.Build
+import com.ytsaver.app.applock.AppLockManager
 import com.ytsaver.app.data.AppDatabase
 import com.ytsaver.app.extract.OkHttpNewPipeDownloader
 import org.schabi.newpipe.extractor.NewPipe
@@ -16,6 +17,7 @@ class YtSaverApp : Application() {
         super.onCreate()
         NewPipe.init(OkHttpNewPipeDownloader.instance)
         createDownloadNotificationChannel()
+        AppLockManager.registerLifecycleObserver()
     }
 
     private fun createDownloadNotificationChannel() {

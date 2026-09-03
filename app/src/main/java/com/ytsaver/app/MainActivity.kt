@@ -15,7 +15,6 @@ import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
-import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.ActivityResultLauncher
@@ -42,10 +41,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.fragment.app.FragmentActivity
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.ytsaver.app.applock.AppLockManager
+import com.ytsaver.app.applock.AppLockScreen
+import com.ytsaver.app.applock.canUseAppLock
 import com.ytsaver.app.data.SavedMedia
 import com.ytsaver.app.ui.browser.YoutubeBrowserScreen
 import com.ytsaver.app.license.LicenseGateScreen
@@ -57,7 +60,7 @@ import com.ytsaver.app.ui.player.PipState
 import com.ytsaver.app.ui.player.PlayerScreen
 import com.ytsaver.app.ui.theme.YtSaverTheme
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
 
     private val pipActionReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -79,7 +82,7 @@ class MainActivity : ComponentActivity() {
         }
         setContent {
             YtSaverTheme {
-                AppRoot()
+                AppRoot(activity = this@MainActivity)
             }
         }
     }
@@ -129,12 +132,18 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun AppRoot() {
+private fun AppRoot(activity: FragmentActivity) {
     val context = LocalContext.current
     var licensed by remember { mutableStateOf(!LicenseManager.requiresKey(context)) }
 
     if (!licensed) {
         LicenseGateScreen(onUnlocked = { licensed = true })
+        return
+    }
+
+    val appLocked by AppLockManager.locked.collectAsState()
+    if (appLocked && canUseAppLock(activity)) {
+        AppLockScreen(activity = activity, onUnlocked = { AppLockManager.unlock() })
         return
     }
 

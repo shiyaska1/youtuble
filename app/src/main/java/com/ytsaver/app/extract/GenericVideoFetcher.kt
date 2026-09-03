@@ -61,7 +61,8 @@ object GenericVideoFetcher {
                 streamUrl = resolveUrl(url, videoUrl),
                 fileExtension = extension,
                 mimeType = mimeType,
-                label = "Video"
+                label = "Video",
+                referer = url
             )
 
             FetchedStream(
