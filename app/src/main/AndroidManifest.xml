@@ -8,6 +8,12 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- Only needed/requested below API 29: writing to the real public Movies/Music
+         folders (so downloads show up in Gallery/file managers) requires this on
+         older Android versions; API 29+ uses MediaStore instead, which doesn't. -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
 
     <application
         android:name=".YtSaverApp"

@@ -158,6 +158,7 @@ class DownloadService : Service() {
                 is DownloadTarget.LegacyFile -> {
                     storedPath = resolvedTarget.file.absolutePath
                     sizeBytes = resolvedTarget.file.length()
+                    scanLegacyFile(resolvedTarget.file, request.mimeType)
                 }
             }
 
@@ -260,11 +261,28 @@ class DownloadService : Service() {
         return ranges
     }
 
+    /**
+     * Only used below API 29, where [PublicMediaStore] isn't available. Saves to the real
+     * public Movies/YTSaver or Music/YTSaver folder (visible to Gallery, file managers, etc.)
+     * rather than the app's private external-files dir, which nothing else can see. Requires
+     * WRITE_EXTERNAL_STORAGE, requested at startup for these older API levels.
+     */
     private fun legacyMediaDir(type: MediaType): File {
         val publicSubDir = if (type == MediaType.VIDEO) Environment.DIRECTORY_MOVIES else Environment.DIRECTORY_MUSIC
-        val dir = getExternalFilesDir(publicSubDir) ?: filesDir
-        dir.mkdirs()
-        return dir
+        val publicRoot = Environment.getExternalStoragePublicDirectory(publicSubDir)
+        val dir = File(publicRoot, "YTSaver")
+        if (dir.mkdirs() || dir.isDirectory) return dir
+        // Fall back to the private dir only if the public one truly can't be created
+        // (e.g. permission missing/denied).
+        val fallback = getExternalFilesDir(publicSubDir) ?: filesDir
+        fallback.mkdirs()
+        return fallback
+    }
+
+    /** Makes a legacy-path file show up in Gallery/file managers immediately instead of
+     *  waiting for the next full media scan. */
+    private fun scanLegacyFile(file: File, mimeType: String) {
+        android.media.MediaScannerConnection.scanFile(this, arrayOf(file.absolutePath), arrayOf(mimeType), null)
     }
 
     private fun uniqueFile(dir: File, baseName: String, extension: String): File {

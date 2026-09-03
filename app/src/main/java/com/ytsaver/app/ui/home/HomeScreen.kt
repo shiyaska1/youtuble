@@ -50,7 +50,10 @@ fun HomeScreen(viewModel: HomeViewModel = viewModel()) {
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Text("Paste YouTube links — or direct video/audio file links", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "Paste YouTube links, direct video/audio file links, or a page with an embedded video",
+                style = MaterialTheme.typography.titleMedium
+            )
 
             Row(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),

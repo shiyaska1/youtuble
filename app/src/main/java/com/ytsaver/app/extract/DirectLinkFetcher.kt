@@ -29,6 +29,9 @@ object DirectLinkFetcher {
             val url = rawUrl.trim()
             val headers = probeHeaders(url)
             val contentType = headers["Content-Type"]?.substringBefore(';') ?: "application/octet-stream"
+            if (!looksLikeMediaContentType(contentType)) {
+                throw java.io.IOException("That link doesn't point straight at a video/audio file (got \"$contentType\")")
+            }
             val isAudio = contentType.startsWith("audio/")
 
             val option = MediaOption(
@@ -48,6 +51,14 @@ object DirectLinkFetcher {
             )
         }
     }
+
+    private fun looksLikeMediaContentType(contentType: String): Boolean =
+        contentType.startsWith("video/") ||
+            contentType.startsWith("audio/") ||
+            contentType == "application/octet-stream" ||
+            contentType == "application/vnd.apple.mpegurl" ||
+            contentType == "application/x-mpegURL" ||
+            contentType == "application/dash+xml"
 
     private fun probeHeaders(url: String): Headers {
         val headRequest = Request.Builder().url(url).head().build()

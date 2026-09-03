@@ -139,11 +139,18 @@ private fun AppRoot() {
     }
 
     val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
+    val storagePermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
     val batteryOptimizationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {}
 
     LaunchedEffect(Unit) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        // Below API 29 downloads are saved with WRITE_EXTERNAL_STORAGE to a real public
+        // folder (see DownloadService.legacyMediaDir) instead of MediaStore; that
+        // permission needs a runtime request on API 23+.
+        if (Build.VERSION.SDK_INT in Build.VERSION_CODES.M until Build.VERSION_CODES.Q) {
+            storagePermission.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
         }
         requestUnrestrictedBatteryOnce(context, batteryOptimizationLauncher)
     }

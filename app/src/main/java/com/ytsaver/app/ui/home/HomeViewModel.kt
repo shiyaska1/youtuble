@@ -7,6 +7,7 @@ import com.ytsaver.app.data.MediaType
 import com.ytsaver.app.download.DownloadService
 import com.ytsaver.app.extract.DirectLinkFetcher
 import com.ytsaver.app.extract.FetchedStream
+import com.ytsaver.app.extract.GenericVideoFetcher
 import com.ytsaver.app.extract.MediaOption
 import com.ytsaver.app.extract.YoutubeStreamFetcher
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -64,7 +65,10 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             val result = if (DirectLinkFetcher.looksLikeYoutubeUrl(url)) {
                 YoutubeStreamFetcher.fetch(url)
             } else {
-                DirectLinkFetcher.fetch(url)
+                // Try it as a direct media-file link first; if that link is
+                // actually a webpage (not a raw video/audio file), fall back
+                // to scraping the page for an embedded video.
+                DirectLinkFetcher.fetch(url).recoverCatching { GenericVideoFetcher.fetch(url).getOrThrow() }
             }
             result
                 .onSuccess { stream -> updateQueueItem(id) { QueueStatus.Ready(stream, stream.title) } }
