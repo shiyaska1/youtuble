@@ -157,7 +157,12 @@ class DownloadService : Service() {
 
             val resolvedTarget = target
             _progress.value = DownloadProgress(request.caption, 0, 0)
-            val expectedBytes = downloadToTarget(resolvedTarget, request.streamUrl, request.caption, request.cookie, request.referer)
+            val expectedBytes = if (request.isHls) {
+                downloadHlsToTarget(resolvedTarget, request.streamUrl, request.caption, request.cookie, request.referer)
+                null
+            } else {
+                downloadToTarget(resolvedTarget, request.streamUrl, request.caption, request.cookie, request.referer)
+            }
 
             val storedPath: String
             val sizeBytes: Long
@@ -212,6 +217,42 @@ class DownloadService : Service() {
     }
 
     private fun formatMegabytes(bytes: Long): String = "%.1f".format(bytes / (1024.0 * 1024))
+
+    /**
+     * Resolves the playlist to its ordered segment URLs and fetches them one after another,
+     * appending each to the target in order — the standard way to turn an HLS stream (many small
+     * .ts segments) into one playable file without needing ffmpeg. Progress here counts segments,
+     * not bytes, since the total byte size of an HLS stream isn't known ahead of time.
+     */
+    private suspend fun downloadHlsToTarget(
+        target: DownloadTarget,
+        playlistUrl: String,
+        caption: String,
+        cookie: String?,
+        referer: String?
+    ) {
+        val playlist = HlsResolver.resolve(playlistUrl, cookie, referer)
+        if (playlist.isEncrypted) {
+            throw IOException("This video stream is encrypted and can't be downloaded")
+        }
+        if (playlist.segmentUrls.isEmpty()) {
+            throw IOException("Couldn't find any video segments in that stream")
+        }
+
+        var offset = 0L
+        val total = playlist.segmentUrls.size
+        playlist.segmentUrls.forEachIndexed { index, segmentUrl ->
+            val segmentRequest = Request.Builder().url(segmentUrl).withSessionHeaders(cookie, referer).build()
+            client.newCall(segmentRequest).execute().use { response ->
+                if (!response.isSuccessful) throw IOException("Segment ${index + 1} of $total failed (server returned ${response.code})")
+                val bytes = response.body?.bytes() ?: throw IOException("Segment ${index + 1} of $total was empty")
+                writeAt(target, offset) { out -> out.write(bytes) }
+                offset += bytes.size
+            }
+            _progress.value = DownloadProgress(caption, (index + 1).toLong(), total.toLong())
+            updateNotification(caption, (index + 1).toLong(), total.toLong())
+        }
+    }
 
     /**
      * Probes with a small ranged request first. If the server honors it (206 + Content-Range),
@@ -452,7 +493,8 @@ class DownloadService : Service() {
             thumbnailUrl: String?,
             durationSeconds: Long,
             cookie: String? = null,
-            referer: String? = null
+            referer: String? = null,
+            isHls: Boolean = false
         ) {
             val intent = Intent(context, DownloadService::class.java).apply {
                 putExtra(EXTRA_CAPTION, caption)
@@ -465,6 +507,7 @@ class DownloadService : Service() {
                 putExtra(EXTRA_DURATION, durationSeconds)
                 putExtra(EXTRA_COOKIE, cookie)
                 putExtra(EXTRA_REFERER, referer)
+                putExtra(EXTRA_IS_HLS, isHls)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
@@ -483,6 +526,7 @@ class DownloadService : Service() {
         private const val EXTRA_DURATION = "duration"
         private const val EXTRA_COOKIE = "cookie"
         private const val EXTRA_REFERER = "referer"
+        private const val EXTRA_IS_HLS = "isHls"
 
         private fun Intent.toDownloadRequest(): DownloadRequest? {
             val caption = getStringExtra(EXTRA_CAPTION) ?: return null
@@ -500,7 +544,8 @@ class DownloadService : Service() {
                 thumbnailUrl = getStringExtra(EXTRA_THUMBNAIL),
                 durationSeconds = getLongExtra(EXTRA_DURATION, 0),
                 cookie = getStringExtra(EXTRA_COOKIE),
-                referer = getStringExtra(EXTRA_REFERER)
+                referer = getStringExtra(EXTRA_REFERER),
+                isHls = getBooleanExtra(EXTRA_IS_HLS, false)
             )
         }
     }
@@ -521,5 +566,6 @@ private data class DownloadRequest(
     val thumbnailUrl: String?,
     val durationSeconds: Long,
     val cookie: String? = null,
-    val referer: String? = null
+    val referer: String? = null,
+    val isHls: Boolean = false
 )

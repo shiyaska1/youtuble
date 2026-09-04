@@ -44,6 +44,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -63,6 +64,7 @@ import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewFeature
 import com.mobicareapp.data.MediaType
 import com.mobicareapp.download.DownloadService
+import com.mobicareapp.download.HlsResolver
 import com.mobicareapp.extract.BROWSER_USER_AGENT
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -76,10 +78,16 @@ private data class DetectedMedia(
     val type: MediaType,
     val extension: String,
     val mimeType: String,
-    val pageUrl: String?
+    val pageUrl: String?,
+    val isHls: Boolean = false
 )
 
-private val VIDEO_EXTENSIONS = setOf("mp4", "webm", "mkv", "mov", "3gp", "ts")
+// .ts on its own is deliberately not matched here: sites that stream via HLS fire off dozens of
+// tiny .ts segment requests, one per few seconds of video — matching those individually is what
+// showed up as "multiple small KB videos" with no way to tell which one was the real thing. The
+// .m3u8 playlist that references them all is matched instead (below) and resolved into the full,
+// ordered segment list by HlsResolver when downloaded.
+private val VIDEO_EXTENSIONS = setOf("mp4", "webm", "mkv", "mov", "3gp")
 private val AUDIO_EXTENSIONS = setOf("mp3", "m4a", "aac", "wav", "ogg")
 
 // A real Android Chrome UA (not a desktop one) — Google's sign-in flow serves a different,
@@ -117,11 +125,18 @@ fun BrowserScreen(onBack: () -> Unit) {
     var pendingUrl by remember { mutableStateOf<String?>(null) }
     val detected = remember { mutableStateListOf<DetectedMedia>() }
     val sizes = remember { mutableStateMapOf<String, Long?>() }
+    val hlsSegmentCounts = remember { mutableStateMapOf<String, Int?>() }
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
     var popupWebView by remember { mutableStateOf<WebView?>(null) }
     var desktopMode by remember { mutableStateOf(false) }
     val progress by DownloadService.progress.collectAsState()
     val queuedDownloads by DownloadService.queueSize.collectAsState()
+
+    // The skip-ad polling loop below is scheduled on this same handler; stop it when the screen
+    // is left so it doesn't keep firing against a WebView that's no longer shown.
+    DisposableEffect(Unit) {
+        onDispose { mainHandler.removeCallbacksAndMessages(null) }
+    }
 
     Scaffold(
         topBar = {
@@ -188,19 +203,29 @@ fun BrowserScreen(onBack: () -> Unit) {
                     contentPadding = androidx.compose.foundation.layout.PaddingValues(8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    items(detected.sortedByDescending { sizes[it.url] ?: -1L }, key = { it.url }) { media ->
+                    items(
+                        detected.sortedWith(compareByDescending<DetectedMedia> { it.isHls }.thenByDescending { sizes[it.url] ?: -1L }),
+                        key = { it.url }
+                    ) { media ->
                         LaunchedEffect(media.url) {
-                            if (!sizes.containsKey(media.url)) {
+                            if (media.isHls) {
+                                if (!hlsSegmentCounts.containsKey(media.url)) {
+                                    hlsSegmentCounts[media.url] = runCatching {
+                                        HlsResolver.resolve(media.url, CookieManager.getInstance().getCookie(media.url), media.pageUrl).segmentUrls.size
+                                    }.getOrNull()
+                                }
+                            } else if (!sizes.containsKey(media.url)) {
                                 sizes[media.url] = probeContentLength(media.url, media.pageUrl)
                             }
                         }
                         DetectedMediaRow(
                             media = media,
                             sizeBytes = sizes[media.url],
+                            hlsSegmentCount = hlsSegmentCounts[media.url],
                             onDownload = {
                                 DownloadService.start(
                                     context = context,
-                                    caption = fileNameFromUrl(media.url),
+                                    caption = fileNameFromUrl(media.url).ifBlank { "Video" },
                                     sourceUrl = media.url,
                                     streamUrl = media.url,
                                     type = media.type,
@@ -212,7 +237,8 @@ fun BrowserScreen(onBack: () -> Unit) {
                                     // (cookies) and/or a referer matching the page that requested
                                     // it — without these a background fetch can come back empty.
                                     cookie = CookieManager.getInstance().getCookie(media.url),
-                                    referer = media.pageUrl
+                                    referer = media.pageUrl,
+                                    isHls = media.isHls
                                 )
                             }
                         )
@@ -230,6 +256,7 @@ fun BrowserScreen(onBack: () -> Unit) {
                             onPopupRequested = { popupWebView = it },
                             onPopupClosed = { popupWebView = null }
                         )
+                        startAutoSkipAdsLoop(this, mainHandler)
                     }
                 },
                 update = { webView ->
@@ -266,7 +293,7 @@ fun BrowserScreen(onBack: () -> Unit) {
 }
 
 @Composable
-private fun DetectedMediaRow(media: DetectedMedia, sizeBytes: Long?, onDownload: () -> Unit) {
+private fun DetectedMediaRow(media: DetectedMedia, sizeBytes: Long?, hlsSegmentCount: Int?, onDownload: () -> Unit) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(12.dp),
@@ -278,9 +305,18 @@ private fun DetectedMediaRow(media: DetectedMedia, sizeBytes: Long?, onDownload:
             )
             Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
-                Text(fileNameFromUrl(media.url), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    if (media.isHls) "Full video stream" else fileNameFromUrl(media.url),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
                 Text(
                     text = when {
+                        media.isHls -> when (hlsSegmentCount) {
+                            null -> "Checking stream…"
+                            0 -> "Couldn't read stream"
+                            else -> "$hlsSegmentCount parts — downloads the whole video"
+                        }
                         sizeBytes == null -> "Checking size…"
                         sizeBytes <= 0 -> media.extension.uppercase()
                         else -> "${formatBytes(sizeBytes)} · ${media.extension.uppercase()}"
@@ -290,13 +326,46 @@ private fun DetectedMediaRow(media: DetectedMedia, sizeBytes: Long?, onDownload:
                 )
             }
             Spacer(Modifier.width(8.dp))
-            Button(onClick = onDownload) {
+            Button(onClick = onDownload, enabled = !media.isHls || (hlsSegmentCount ?: 0) > 0) {
                 Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(Modifier.width(4.dp))
                 Text("Save")
             }
         }
     }
+}
+
+// Looks for buttons/links that mention "skip" (by visible text, aria-label, class, or id — the
+// common ways an ad player marks its skip control) and clicks them. Scoped to
+// buttons/links/role="button" elements rather than every element on the page so it stays cheap
+// enough to poll repeatedly.
+private const val AUTO_SKIP_AD_SCRIPT = """
+(function() {
+  try {
+    var els = document.querySelectorAll('button, [role="button"], a, [class*="skip" i], [id*="skip" i], [aria-label*="skip" i]');
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      var text = ((el.innerText || el.textContent || '') + ' ' + (el.getAttribute('aria-label') || '')).toLowerCase();
+      var cls = (el.className || '').toString().toLowerCase();
+      var id = (el.id || '').toLowerCase();
+      if (text.indexOf('skip') !== -1 || cls.indexOf('skip') !== -1 || id.indexOf('skip') !== -1) {
+        var rect = el.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) { el.click(); }
+      }
+    }
+  } catch (e) {}
+})();
+"""
+private const val AUTO_SKIP_AD_INTERVAL_MS = 1500L
+
+private fun startAutoSkipAdsLoop(webView: WebView, handler: Handler) {
+    val runnable = object : Runnable {
+        override fun run() {
+            runCatching { webView.evaluateJavascript(AUTO_SKIP_AD_SCRIPT, null) }
+            handler.postDelayed(this, AUTO_SKIP_AD_INTERVAL_MS)
+        }
+    }
+    handler.postDelayed(runnable, AUTO_SKIP_AD_INTERVAL_MS)
 }
 
 private fun configureAsRealBrowser(webView: WebView) {
@@ -401,6 +470,7 @@ private fun classifyMediaUrl(url: String, pageUrl: String?): DetectedMedia? {
     val path = url.substringBefore('?').substringAfterLast('/')
     val extension = path.substringAfterLast('.', "").lowercase()
     return when (extension) {
+        "m3u8" -> DetectedMedia(url, MediaType.VIDEO, "ts", "video/mp2t", pageUrl, isHls = true)
         in VIDEO_EXTENSIONS -> DetectedMedia(url, MediaType.VIDEO, extension, "video/$extension", pageUrl)
         in AUDIO_EXTENSIONS -> DetectedMedia(url, MediaType.AUDIO, extension, if (extension == "mp3") "audio/mpeg" else "audio/$extension", pageUrl)
         else -> null
