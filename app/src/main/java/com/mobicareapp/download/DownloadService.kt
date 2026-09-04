@@ -22,6 +22,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asFlow
@@ -109,8 +110,37 @@ class DownloadService : Service() {
         return START_NOT_STICKY
     }
 
-    @OptIn(ExperimentalCoroutinesApi::class)
+    /**
+     * Retries a download that came back truncated (some CDNs cut a long-lived connection early
+     * under load, which the sequential fallback path can't tell apart from a real EOF) up to a
+     * few times before giving up — each attempt starts over with a fresh target rather than
+     * trying to resume, since the sequential fallback path has no Range support to resume with.
+     */
     private suspend fun runDownload(request: DownloadRequest) {
+        var lastError: Exception? = null
+        repeat(MAX_ATTEMPTS) {
+            try {
+                attemptDownload(request)
+                return
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // The Cancel button surfaces here as a plain IOException ("Canceled") from OkHttp,
+                // not a CancellationException, since it comes from client.dispatcher.cancelAll()
+                // rather than coroutine cancellation alone — check the job explicitly so a
+                // deliberate cancel doesn't get treated as a transient failure worth retrying.
+                kotlin.coroutines.coroutineContext.ensureActive()
+                lastError = e
+            }
+        }
+        _progress.value = DownloadProgress(
+            request.caption, 0, 0, done = true,
+            error = lastError?.message ?: "Download failed"
+        )
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private suspend fun attemptDownload(request: DownloadRequest) {
         val app = application as YtSaverApp
         val fileName = "${sanitizeFileName(request.caption)}.${request.fileExtension}"
         var target: DownloadTarget? = null
@@ -127,7 +157,7 @@ class DownloadService : Service() {
 
             val resolvedTarget = target
             _progress.value = DownloadProgress(request.caption, 0, 0)
-            downloadToTarget(resolvedTarget, request.streamUrl, request.caption, request.cookie, request.referer)
+            val expectedBytes = downloadToTarget(resolvedTarget, request.streamUrl, request.caption, request.cookie, request.referer)
 
             val storedPath: String
             val sizeBytes: Long
@@ -148,6 +178,11 @@ class DownloadService : Service() {
             // error — treat that as a real failure instead of "saving" an unplayable 0-byte file.
             if (sizeBytes <= 0L) {
                 throw IOException("Downloaded file was empty — the link may need you to be signed in, or may have expired")
+            }
+            // Some CDNs close a long-lived connection early under load instead of erroring out,
+            // which used to silently save a truncated file (e.g. 2MB of a much larger video).
+            if (expectedBytes != null && sizeBytes < expectedBytes) {
+                throw IOException("Connection was cut short (got ${formatMegabytes(sizeBytes)} of ${formatMegabytes(expectedBytes)} MB)")
             }
 
             app.database.savedMediaDao().insert(
@@ -172,12 +207,11 @@ class DownloadService : Service() {
                 is DownloadTarget.MediaStoreUri -> PublicMediaStore.abandon(this, t.uri)
                 null -> Unit
             }
-            _progress.value = DownloadProgress(
-                request.caption, 0, 0, done = true,
-                error = e.message ?: "Download failed"
-            )
+            throw e
         }
     }
+
+    private fun formatMegabytes(bytes: Long): String = "%.1f".format(bytes / (1024.0 * 1024))
 
     /**
      * Probes with a small ranged request first. If the server honors it (206 + Content-Range),
@@ -194,7 +228,7 @@ class DownloadService : Service() {
         caption: String,
         cookie: String?,
         referer: String?
-    ) {
+    ): Long? {
         val bytesDone = AtomicLong(0)
         val lastNotify = AtomicLong(0)
 
@@ -236,8 +270,9 @@ class DownloadService : Service() {
                         }
                     }
                     .collect()
+                return totalBytes
             } else {
-                val totalBytes = body.contentLength().takeIf { it > 0 } ?: 0L
+                val totalBytes = body.contentLength().takeIf { it > 0 }
                 writeAt(target, 0) { out ->
                     body.byteStream().use { input ->
                         val buffer = ByteArray(64 * 1024)
@@ -246,10 +281,11 @@ class DownloadService : Service() {
                             if (read == -1) break
                             out.write(buffer, 0, read)
                             bytesDone.addAndGet(read.toLong())
-                            notifyProgress(totalBytes)
+                            notifyProgress(totalBytes ?: 0L)
                         }
                     }
                 }
+                return totalBytes
             }
         }
     }
@@ -390,6 +426,10 @@ class DownloadService : Service() {
         // which is the same workaround yt-dlp/NewPipe use.
         private const val CHUNK_SIZE_BYTES = 5L * 1024 * 1024
         private const val PARALLEL_CONNECTIONS = 4
+
+        // A connection getting cut early is usually transient (CDN load-shedding), so it's
+        // worth a couple of clean retries before surfacing an error to the user.
+        private const val MAX_ATTEMPTS = 3
 
         private val _progress = MutableStateFlow<DownloadProgress?>(null)
         val progress = _progress.asStateFlow()

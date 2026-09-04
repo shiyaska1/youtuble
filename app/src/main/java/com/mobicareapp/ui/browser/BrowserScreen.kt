@@ -26,8 +26,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.DesktopWindows
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -117,6 +119,7 @@ fun BrowserScreen(onBack: () -> Unit) {
     val sizes = remember { mutableStateMapOf<String, Long?>() }
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
     var popupWebView by remember { mutableStateOf<WebView?>(null) }
+    var desktopMode by remember { mutableStateOf(false) }
     val progress by DownloadService.progress.collectAsState()
     val queuedDownloads by DownloadService.queueSize.collectAsState()
 
@@ -138,6 +141,12 @@ fun BrowserScreen(onBack: () -> Unit) {
                     }
                 },
                 actions = {
+                    IconButton(onClick = { desktopMode = !desktopMode }) {
+                        Icon(
+                            if (desktopMode) Icons.Default.PhoneAndroid else Icons.Default.DesktopWindows,
+                            contentDescription = if (desktopMode) "Switch to mobile site" else "Switch to desktop site"
+                        )
+                    }
                     TextButton(onClick = { pendingUrl = normalizeUrl(addressText) }) { Text("Go") }
                 }
             )
@@ -224,6 +233,15 @@ fun BrowserScreen(onBack: () -> Unit) {
                     }
                 },
                 update = { webView ->
+                    val desiredUserAgent = if (desktopMode) BROWSER_USER_AGENT else MOBILE_CHROME_USER_AGENT
+                    if (webView.settings.userAgentString != desiredUserAgent) {
+                        webView.settings.userAgentString = desiredUserAgent
+                        // Desktop sites also check the viewport meta tag, not just the UA string —
+                        // this is the same trick real browsers use for "Request desktop site".
+                        webView.settings.useWideViewPort = desktopMode
+                        webView.settings.loadWithOverviewMode = desktopMode
+                        webView.reload()
+                    }
                     pendingUrl?.let { url ->
                         if (webView.url != url) webView.loadUrl(url)
                     }
