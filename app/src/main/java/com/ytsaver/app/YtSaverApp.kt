@@ -16,6 +16,7 @@ class YtSaverApp : Application() {
         super.onCreate()
         NewPipe.init(OkHttpNewPipeDownloader.instance)
         createDownloadNotificationChannel()
+        createRecordNotificationChannel()
     }
 
     private fun createDownloadNotificationChannel() {
@@ -32,7 +33,22 @@ class YtSaverApp : Application() {
         }
     }
 
+    private fun createRecordNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                RECORD_CHANNEL_ID,
+                "Recording",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "Shows an ongoing notice while audio or video is being recorded"
+            }
+            val manager = getSystemService(NotificationManager::class.java)
+            manager.createNotificationChannel(channel)
+        }
+    }
+
     companion object {
         const val DOWNLOAD_CHANNEL_ID = "downloads"
+        const val RECORD_CHANNEL_ID = "recording"
     }
 }

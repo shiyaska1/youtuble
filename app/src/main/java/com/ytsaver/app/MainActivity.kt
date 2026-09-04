@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.DocumentScanner
+import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
@@ -52,6 +53,7 @@ import com.ytsaver.app.ui.library.LibraryScreen
 import com.ytsaver.app.ui.nav.ContactBanner
 import com.ytsaver.app.ui.player.PipState
 import com.ytsaver.app.ui.player.PlayerScreen
+import com.ytsaver.app.ui.record.RecordScreen
 import com.ytsaver.app.ui.scan.ScanScreen
 import com.ytsaver.app.ui.theme.YtSaverTheme
 
@@ -202,6 +204,12 @@ private fun MainScaffold(onOpenVideo: (List<SavedMedia>, Int, Boolean) -> Unit) 
                     icon = { Icon(Icons.Default.DocumentScanner, contentDescription = "Scan") },
                     label = { Text("Scan") }
                 )
+                NavigationBarItem(
+                    selected = selectedTab == 3,
+                    onClick = { selectedTab = 3 },
+                    icon = { Icon(Icons.Default.FiberManualRecord, contentDescription = "Record") },
+                    label = { Text("Record") }
+                )
             }
         }
     ) { padding ->
@@ -209,7 +217,8 @@ private fun MainScaffold(onOpenVideo: (List<SavedMedia>, Int, Boolean) -> Unit) 
             when (selectedTab) {
                 0 -> HomeScreen()
                 1 -> LibraryScreen(onOpenVideo = onOpenVideo)
-                else -> ScanScreen()
+                2 -> ScanScreen()
+                else -> RecordScreen()
             }
         }
     }
