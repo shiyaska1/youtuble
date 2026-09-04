@@ -13,33 +13,47 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Download
-import androidx.compose.material3.AssistChip
+import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
@@ -47,7 +61,13 @@ import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewFeature
 import com.mobicareapp.data.MediaType
 import com.mobicareapp.download.DownloadService
+import com.mobicareapp.extract.BROWSER_USER_AGENT
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import java.net.URLDecoder
+import java.util.concurrent.TimeUnit
 
 private data class DetectedMedia(
     val url: String,
@@ -66,6 +86,14 @@ private const val MOBILE_CHROME_USER_AGENT =
     "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) " +
         "Chrome/124.0.0.0 Mobile Safari/537.36"
 
+private val probeClient = OkHttpClient.Builder()
+    .connectTimeout(8, TimeUnit.SECONDS)
+    .readTimeout(8, TimeUnit.SECONDS)
+    .addInterceptor { chain ->
+        chain.proceed(chain.request().newBuilder().header("User-Agent", BROWSER_USER_AGENT).build())
+    }
+    .build()
+
 /**
  * Many sites embed their video/audio behind a normal webpage (no direct file link, no YouTube-
  * style page we can extract from) — the only way in is to actually load the page and watch what
@@ -73,8 +101,10 @@ private const val MOBILE_CHROME_USER_AGENT =
  * Google Sign-In work — a plain WebView gets blocked by Google's "this browser may not be
  * secure" check because of the X-Requested-With header Android adds by default, and because
  * Google's sign-in flow opens in a popup window a bare WebView otherwise can't display) and
- * inspects every request it makes; anything that looks like a raw media file gets offered as a
- * one-tap download via the same DownloadService used everywhere else in the app.
+ * inspects every request it makes; anything that looks like a raw media file gets listed with its
+ * file size (a page usually fires off several small unrelated video/audio requests — ads,
+ * thumbnails, preview clips — so size is what tells those apart from the actual video) and offered
+ * as a one-tap download via the same DownloadService used everywhere else in the app.
  */
 @SuppressLint("SetJavaScriptEnabled")
 @OptIn(ExperimentalMaterial3Api::class)
@@ -84,8 +114,11 @@ fun BrowserScreen(onBack: () -> Unit) {
     var addressText by remember { mutableStateOf("") }
     var pendingUrl by remember { mutableStateOf<String?>(null) }
     val detected = remember { mutableStateListOf<DetectedMedia>() }
+    val sizes = remember { mutableStateMapOf<String, Long?>() }
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
     var popupWebView by remember { mutableStateOf<WebView?>(null) }
+    val progress by DownloadService.progress.collectAsState()
+    val queuedDownloads by DownloadService.queueSize.collectAsState()
 
     Scaffold(
         topBar = {
@@ -111,14 +144,51 @@ fun BrowserScreen(onBack: () -> Unit) {
         }
     ) { padding ->
         Column(modifier = Modifier.fillMaxSize().padding(padding)) {
+            progress?.let { p ->
+                Card(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                modifier = Modifier.weight(1f),
+                                text = if (p.done) {
+                                    if (p.error != null) "Failed: ${p.error}" else "Saved \"${p.caption}\""
+                                } else {
+                                    "Saving \"${p.caption}\"…" + if (queuedDownloads > 1) " (${queuedDownloads - 1} more queued)" else ""
+                                }
+                            )
+                            if (p.done) {
+                                IconButton(onClick = { DownloadService.clearProgress() }) {
+                                    Icon(Icons.Default.Close, contentDescription = "Dismiss")
+                                }
+                            } else {
+                                TextButton(onClick = { DownloadService.cancelCurrent() }) { Text("Cancel") }
+                            }
+                        }
+                        if (!p.done) {
+                            Spacer(Modifier.height(8.dp))
+                            val fraction = if (p.totalBytes > 0) p.bytesDone.toFloat() / p.totalBytes else 0f
+                            LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
+                        }
+                    }
+                }
+            }
+
             if (detected.isNotEmpty()) {
-                LazyRow(
-                    modifier = Modifier.fillMaxWidth().padding(8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth().height(if (detected.size > 3) 260.dp else (detected.size * 84).dp),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    items(detected, key = { it.url }) { media ->
-                        AssistChip(
-                            onClick = {
+                    items(detected.sortedByDescending { sizes[it.url] ?: -1L }, key = { it.url }) { media ->
+                        LaunchedEffect(media.url) {
+                            if (!sizes.containsKey(media.url)) {
+                                sizes[media.url] = probeContentLength(media.url, media.pageUrl)
+                            }
+                        }
+                        DetectedMediaRow(
+                            media = media,
+                            sizeBytes = sizes[media.url],
+                            onDownload = {
                                 DownloadService.start(
                                     context = context,
                                     caption = fileNameFromUrl(media.url),
@@ -135,11 +205,7 @@ fun BrowserScreen(onBack: () -> Unit) {
                                     cookie = CookieManager.getInstance().getCookie(media.url),
                                     referer = media.pageUrl
                                 )
-                            },
-                            leadingIcon = {
-                                Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(16.dp))
-                            },
-                            label = { Text(if (media.type == MediaType.VIDEO) "Video found" else "Audio found") }
+                            }
                         )
                     }
                 }
@@ -176,6 +242,40 @@ fun BrowserScreen(onBack: () -> Unit) {
                     Icon(Icons.Default.Close, contentDescription = "Close")
                 }
                 AndroidView(modifier = Modifier.fillMaxSize(), factory = { popup })
+            }
+        }
+    }
+}
+
+@Composable
+private fun DetectedMediaRow(media: DetectedMedia, sizeBytes: Long?, onDownload: () -> Unit) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                if (media.type == MediaType.VIDEO) Icons.Default.Videocam else Icons.Default.MusicNote,
+                contentDescription = null
+            )
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(fileNameFromUrl(media.url), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    text = when {
+                        sizeBytes == null -> "Checking size…"
+                        sizeBytes <= 0 -> media.extension.uppercase()
+                        else -> "${formatBytes(sizeBytes)} · ${media.extension.uppercase()}"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Spacer(Modifier.width(8.dp))
+            Button(onClick = onDownload) {
+                Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("Save")
             }
         }
     }
@@ -252,6 +352,28 @@ private fun popupHostingWebChromeClient(
     }
 }
 
+/** A quiet best-effort HEAD probe just to learn file size — failures are fine, the row just shows no size. */
+private suspend fun probeContentLength(url: String, referer: String?): Long? = withContext(Dispatchers.IO) {
+    runCatching {
+        val cookie = CookieManager.getInstance().getCookie(url)
+        val request = Request.Builder().url(url).head().apply {
+            if (!cookie.isNullOrBlank()) header("Cookie", cookie)
+            if (!referer.isNullOrBlank()) header("Referer", referer)
+        }.build()
+        probeClient.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) return@withContext null
+            response.header("Content-Length")?.toLongOrNull()
+        }
+    }.getOrNull()
+}
+
+private fun formatBytes(bytes: Long): String = when {
+    bytes >= 1024 * 1024 * 1024 -> "%.1f GB".format(bytes / (1024.0 * 1024 * 1024))
+    bytes >= 1024 * 1024 -> "%.1f MB".format(bytes / (1024.0 * 1024))
+    bytes >= 1024 -> "%.0f KB".format(bytes / 1024.0)
+    else -> "$bytes B"
+}
+
 private fun normalizeUrl(input: String): String {
     val trimmed = input.trim()
     return if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) trimmed else "https://$trimmed"
@@ -270,5 +392,5 @@ private fun classifyMediaUrl(url: String, pageUrl: String?): DetectedMedia? {
 private fun fileNameFromUrl(url: String): String {
     val path = url.substringBefore('?').substringAfterLast('/')
     val decoded = runCatching { URLDecoder.decode(path, "UTF-8") }.getOrDefault(path)
-    return decoded.substringBeforeLast('.').ifBlank { "Downloaded file" }
+    return decoded.ifBlank { "Downloaded file" }
 }
