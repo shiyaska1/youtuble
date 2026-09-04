@@ -122,30 +122,8 @@ class DownloadService : Service() {
             }
 
             val resolvedTarget = target
-
-            // A small synchronous probe learns the real file size (from Content-Range)
-            // before splitting the rest into chunks fetched concurrently.
-            val (totalBytes, probedBytes) = probeAndWriteFirstBytes(resolvedTarget, request.streamUrl)
-            val bytesDone = AtomicLong(probedBytes)
-            val lastNotify = AtomicLong(0)
-            _progress.value = DownloadProgress(request.caption, bytesDone.get(), totalBytes)
-
-            buildRanges(probedBytes, totalBytes, CHUNK_SIZE_BYTES).asFlow()
-                .flatMapMerge(concurrency = PARALLEL_CONNECTIONS) { range ->
-                    flow {
-                        downloadRangeInto(resolvedTarget, request.streamUrl, range) { justRead ->
-                            val done = bytesDone.addAndGet(justRead.toLong())
-                            _progress.value = DownloadProgress(request.caption, done, totalBytes)
-                            val now = System.currentTimeMillis()
-                            val prevNotify = lastNotify.get()
-                            if (now - prevNotify > 400 && lastNotify.compareAndSet(prevNotify, now)) {
-                                updateNotification(request.caption, done, totalBytes)
-                            }
-                        }
-                        emit(Unit)
-                    }
-                }
-                .collect()
+            _progress.value = DownloadProgress(request.caption, 0, 0)
+            downloadToTarget(resolvedTarget, request.streamUrl, request.caption)
 
             val storedPath: String
             val sizeBytes: Long
@@ -190,20 +168,71 @@ class DownloadService : Service() {
         }
     }
 
-    /** Fetches the first chunk synchronously so we learn the real file size before parallelizing. */
-    private fun probeAndWriteFirstBytes(target: DownloadTarget, url: String): Pair<Long, Long> {
-        val httpRequest = Request.Builder()
+    /**
+     * Probes with a small ranged request first. If the server honors it (206 + Content-Range),
+     * the rest is fanned out over parallel ranged connections like before. Some CDNs instead
+     * ignore the Range header and just return the whole file from byte 0 on a 200 — issuing more
+     * Range requests to a server like that would silently re-fetch byte 0 into every "chunk" and
+     * corrupt the output, so that case (and the case where no size is reported at all) falls back
+     * to streaming everything sequentially over the one open connection instead.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private suspend fun downloadToTarget(target: DownloadTarget, url: String, caption: String) {
+        val bytesDone = AtomicLong(0)
+        val lastNotify = AtomicLong(0)
+
+        fun notifyProgress(totalBytes: Long) {
+            val done = bytesDone.get()
+            _progress.value = DownloadProgress(caption, done, totalBytes)
+            val now = System.currentTimeMillis()
+            val prevNotify = lastNotify.get()
+            if (now - prevNotify > 400 && lastNotify.compareAndSet(prevNotify, now)) {
+                updateNotification(caption, done, totalBytes)
+            }
+        }
+
+        val probeRequest = Request.Builder()
             .url(url)
             .header("Range", "bytes=0-${PROBE_BYTES - 1}")
             .build()
-        client.newCall(httpRequest).execute().use { response ->
+        client.newCall(probeRequest).execute().use { response ->
             if (!response.isSuccessful) throw IOException("Server returned ${response.code}")
-            val totalBytes = parseTotalBytes(response.header("Content-Range"))
-                ?: response.body?.contentLength()?.takeIf { it > 0 }
-                ?: throw IOException("Server didn't report a file size")
-            val bytes = response.body?.bytes() ?: throw IOException("Empty response body")
-            writeAt(target, 0) { out -> out.write(bytes) }
-            return totalBytes to bytes.size.toLong()
+            val body = response.body ?: throw IOException("Empty response body")
+
+            if (response.code == 206) {
+                val totalBytes = parseTotalBytes(response.header("Content-Range"))
+                    ?: throw IOException("Server didn't report a file size")
+                val probed = body.bytes()
+                writeAt(target, 0) { out -> out.write(probed) }
+                bytesDone.set(probed.size.toLong())
+                notifyProgress(totalBytes)
+
+                buildRanges(probed.size.toLong(), totalBytes, CHUNK_SIZE_BYTES).asFlow()
+                    .flatMapMerge(concurrency = PARALLEL_CONNECTIONS) { range ->
+                        flow {
+                            downloadRangeInto(target, url, range) { justRead ->
+                                bytesDone.addAndGet(justRead.toLong())
+                                notifyProgress(totalBytes)
+                            }
+                            emit(Unit)
+                        }
+                    }
+                    .collect()
+            } else {
+                val totalBytes = body.contentLength().takeIf { it > 0 } ?: 0L
+                writeAt(target, 0) { out ->
+                    body.byteStream().use { input ->
+                        val buffer = ByteArray(64 * 1024)
+                        while (true) {
+                            val read = input.read(buffer)
+                            if (read == -1) break
+                            out.write(buffer, 0, read)
+                            bytesDone.addAndGet(read.toLong())
+                            notifyProgress(totalBytes)
+                        }
+                    }
+                }
+            }
         }
     }
 
