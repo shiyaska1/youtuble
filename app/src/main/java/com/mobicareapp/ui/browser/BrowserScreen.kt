@@ -209,8 +209,18 @@ private fun mediaSniffingWebViewClient(
     mainHandler: Handler,
     detected: androidx.compose.runtime.snapshots.SnapshotStateList<DetectedMedia>
 ): WebViewClient = object : WebViewClient() {
+    // shouldInterceptRequest fires on a background thread, but WebView.getUrl() (view.url) is
+    // only safe to call on the thread that owns the WebView — calling it here crashed the app on
+    // literally every request. onPageStarted *does* run on the main thread, so track the current
+    // page URL there instead of reading it off the WebView from the wrong thread.
+    private val currentPageUrl = java.util.concurrent.atomic.AtomicReference<String?>(null)
+
+    override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {
+        currentPageUrl.set(url)
+    }
+
     override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
-        classifyMediaUrl(request.url.toString(), view.url)?.let { media ->
+        classifyMediaUrl(request.url.toString(), currentPageUrl.get())?.let { media ->
             mainHandler.post {
                 if (detected.none { it.url == media.url }) detected.add(media)
             }
@@ -224,6 +234,8 @@ private fun popupHostingWebChromeClient(
     onPopupClosed: () -> Unit
 ): WebChromeClient = object : WebChromeClient() {
     override fun onCreateWindow(view: WebView, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message): Boolean {
+        val transport = resultMsg.obj as? WebView.WebViewTransport ?: return false
+
         val popup = WebView(view.context)
         configureAsRealBrowser(popup)
         popup.webViewClient = WebViewClient()
@@ -234,7 +246,6 @@ private fun popupHostingWebChromeClient(
         }
         onPopupRequested(popup)
 
-        val transport = resultMsg.obj as WebView.WebViewTransport
         transport.webView = popup
         resultMsg.sendToTarget()
         return true
