@@ -18,7 +18,18 @@ object DirectLinkFetcher {
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .addInterceptor { chain ->
-            chain.proceed(chain.request().newBuilder().header("User-Agent", BROWSER_USER_AGENT).build())
+            val request = chain.request()
+            // Many hosts hotlink-protect their media: they check that the request's Referer
+            // is a page on their own site before serving it, and otherwise answer with an
+            // HTML error page instead (still 200/206, which is what made downloads silently
+            // save an unplayable file). Claiming the file's own origin as the referer, the
+            // way a browser would when playing it embedded on that site, satisfies that check.
+            chain.proceed(
+                request.newBuilder()
+                    .header("User-Agent", BROWSER_USER_AGENT)
+                    .header("Referer", "${request.url.scheme}://${request.url.host}/")
+                    .build()
+            )
         }
         .build()
 
