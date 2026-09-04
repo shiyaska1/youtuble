@@ -127,7 +127,7 @@ class DownloadService : Service() {
 
             val resolvedTarget = target
             _progress.value = DownloadProgress(request.caption, 0, 0)
-            downloadToTarget(resolvedTarget, request.streamUrl, request.caption)
+            downloadToTarget(resolvedTarget, request.streamUrl, request.caption, request.cookie, request.referer)
 
             val storedPath: String
             val sizeBytes: Long
@@ -141,6 +141,13 @@ class DownloadService : Service() {
                     storedPath = resolvedTarget.file.absolutePath
                     sizeBytes = resolvedTarget.file.length()
                 }
+            }
+
+            // An empty result usually means the link needed something we didn't send (session
+            // cookies, a specific referer) and the server answered with nothing rather than an
+            // error — treat that as a real failure instead of "saving" an unplayable 0-byte file.
+            if (sizeBytes <= 0L) {
+                throw IOException("Downloaded file was empty — the link may need you to be signed in, or may have expired")
             }
 
             app.database.savedMediaDao().insert(
@@ -181,7 +188,13 @@ class DownloadService : Service() {
      * to streaming everything sequentially over the one open connection instead.
      */
     @OptIn(ExperimentalCoroutinesApi::class)
-    private suspend fun downloadToTarget(target: DownloadTarget, url: String, caption: String) {
+    private suspend fun downloadToTarget(
+        target: DownloadTarget,
+        url: String,
+        caption: String,
+        cookie: String?,
+        referer: String?
+    ) {
         val bytesDone = AtomicLong(0)
         val lastNotify = AtomicLong(0)
 
@@ -198,6 +211,7 @@ class DownloadService : Service() {
         val probeRequest = Request.Builder()
             .url(url)
             .header("Range", "bytes=0-${PROBE_BYTES - 1}")
+            .withSessionHeaders(cookie, referer)
             .build()
         client.newCall(probeRequest).execute().use { response ->
             if (!response.isSuccessful) throw IOException("Server returned ${response.code}")
@@ -214,7 +228,7 @@ class DownloadService : Service() {
                 buildRanges(probed.size.toLong(), totalBytes, CHUNK_SIZE_BYTES).asFlow()
                     .flatMapMerge(concurrency = PARALLEL_CONNECTIONS) { range ->
                         flow {
-                            downloadRangeInto(target, url, range) { justRead ->
+                            downloadRangeInto(target, url, range, cookie, referer) { justRead ->
                                 bytesDone.addAndGet(justRead.toLong())
                                 notifyProgress(totalBytes)
                             }
@@ -240,10 +254,18 @@ class DownloadService : Service() {
         }
     }
 
-    private fun downloadRangeInto(target: DownloadTarget, url: String, range: LongRange, onBytes: (Int) -> Unit) {
+    private fun downloadRangeInto(
+        target: DownloadTarget,
+        url: String,
+        range: LongRange,
+        cookie: String?,
+        referer: String?,
+        onBytes: (Int) -> Unit
+    ) {
         val httpRequest = Request.Builder()
             .url(url)
             .header("Range", "bytes=${range.first}-${range.last}")
+            .withSessionHeaders(cookie, referer)
             .build()
         client.newCall(httpRequest).execute().use { response ->
             if (!response.isSuccessful) throw IOException("Server returned ${response.code}")
@@ -260,6 +282,12 @@ class DownloadService : Service() {
                 }
             }
         }
+    }
+
+    /** Carries the Browse screen's WebView session along to the actual byte-fetching requests — some sites only serve the file to a signed-in session or a matching referer. */
+    private fun Request.Builder.withSessionHeaders(cookie: String?, referer: String?): Request.Builder = apply {
+        if (!cookie.isNullOrBlank()) header("Cookie", cookie)
+        if (!referer.isNullOrBlank()) header("Referer", referer)
     }
 
     private fun writeAt(target: DownloadTarget, offset: Long, block: (OutputStream) -> Unit) {
@@ -382,7 +410,9 @@ class DownloadService : Service() {
             fileExtension: String,
             mimeType: String,
             thumbnailUrl: String?,
-            durationSeconds: Long
+            durationSeconds: Long,
+            cookie: String? = null,
+            referer: String? = null
         ) {
             val intent = Intent(context, DownloadService::class.java).apply {
                 putExtra(EXTRA_CAPTION, caption)
@@ -393,6 +423,8 @@ class DownloadService : Service() {
                 putExtra(EXTRA_MIME_TYPE, mimeType)
                 putExtra(EXTRA_THUMBNAIL, thumbnailUrl)
                 putExtra(EXTRA_DURATION, durationSeconds)
+                putExtra(EXTRA_COOKIE, cookie)
+                putExtra(EXTRA_REFERER, referer)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
@@ -409,6 +441,8 @@ class DownloadService : Service() {
         private const val EXTRA_MIME_TYPE = "mimeType"
         private const val EXTRA_THUMBNAIL = "thumbnail"
         private const val EXTRA_DURATION = "duration"
+        private const val EXTRA_COOKIE = "cookie"
+        private const val EXTRA_REFERER = "referer"
 
         private fun Intent.toDownloadRequest(): DownloadRequest? {
             val caption = getStringExtra(EXTRA_CAPTION) ?: return null
@@ -424,7 +458,9 @@ class DownloadService : Service() {
                 fileExtension = extension,
                 mimeType = getStringExtra(EXTRA_MIME_TYPE) ?: if (type == MediaType.VIDEO) "video/mp4" else "audio/mp4",
                 thumbnailUrl = getStringExtra(EXTRA_THUMBNAIL),
-                durationSeconds = getLongExtra(EXTRA_DURATION, 0)
+                durationSeconds = getLongExtra(EXTRA_DURATION, 0),
+                cookie = getStringExtra(EXTRA_COOKIE),
+                referer = getStringExtra(EXTRA_REFERER)
             )
         }
     }
@@ -443,5 +479,7 @@ private data class DownloadRequest(
     val fileExtension: String,
     val mimeType: String,
     val thumbnailUrl: String?,
-    val durationSeconds: Long
+    val durationSeconds: Long,
+    val cookie: String? = null,
+    val referer: String? = null
 )

@@ -84,6 +84,9 @@ dependencies {
 
     // Core
     implementation("androidx.core:core-ktx:1.13.1")
+    // Lets the in-app Browse WebView suppress the X-Requested-With header, which is what
+    // makes Google block "Sign in with Google" inside a plain WebView.
+    implementation("androidx.webkit:webkit:1.12.1")
     // DocumentFile API for the backup/restore folder picker (SAF)
     implementation("androidx.documentfile:documentfile:1.0.1")
 
