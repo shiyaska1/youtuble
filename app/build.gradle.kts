@@ -58,6 +58,8 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     // .await() on the ListenableFuture that MediaController.Builder returns
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-guava:1.8.1")
+    // .await() on the Task that the document scanner's getStartScanIntent() returns
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.8.1")
 
     // Room (caption/name + metadata database)
     implementation("androidx.room:room-runtime:2.6.1")
@@ -84,4 +86,8 @@ dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     // DocumentFile API for the backup/restore folder picker (SAF)
     implementation("androidx.documentfile:documentfile:1.0.1")
+
+    // Camera scan-to-PDF: Google Play Services' own scanning UI (edge detection,
+    // crop, multi-page capture) instead of a hand-rolled CameraX flow.
+    implementation("com.google.android.gms:play-services-mlkit-document-scanner:16.0.0")
 }

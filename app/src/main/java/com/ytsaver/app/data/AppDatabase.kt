@@ -91,12 +91,34 @@ private val MIGRATION_3_4 = object : Migration(3, 4) {
     }
 }
 
-@Database(entities = [SavedMedia::class, MediaCategory::class], version = 4, exportSchema = false)
+private val MIGRATION_4_5 = object : Migration(4, 5) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS scanned_documents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                name TEXT NOT NULL,
+                pageCount INTEGER NOT NULL,
+                filePath TEXT NOT NULL,
+                thumbnailPath TEXT,
+                createdAt INTEGER NOT NULL
+            )
+            """.trimIndent()
+        )
+    }
+}
+
+@Database(
+    entities = [SavedMedia::class, MediaCategory::class, ScannedDocument::class],
+    version = 5,
+    exportSchema = false
+)
 @TypeConverters(Converters::class)
 abstract class AppDatabase : RoomDatabase() {
 
     abstract fun savedMediaDao(): SavedMediaDao
     abstract fun mediaCategoryDao(): MediaCategoryDao
+    abstract fun scannedDocumentDao(): ScannedDocumentDao
 
     companion object {
         fun build(context: Context): AppDatabase =
@@ -105,7 +127,7 @@ abstract class AppDatabase : RoomDatabase() {
                 AppDatabase::class.java,
                 "ytsaver.db"
             )
-                .addMigrations(MIGRATION_2_3, MIGRATION_3_4)
+                .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                 // Covers anyone still on the pre-migration schema (version 1) — everyone on
                 // version 2+ goes through the real migration above and keeps their library.
                 .fallbackToDestructiveMigration()
