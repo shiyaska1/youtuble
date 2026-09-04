@@ -26,9 +26,11 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DocumentScanner
+import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.Share
@@ -44,7 +46,10 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -72,6 +77,7 @@ fun ScanScreen() {
     val reviewPages by viewModel.reviewPages.collectAsState()
     val saving by viewModel.saving.collectAsState()
     val scope = rememberCoroutineScope()
+    var viewingDocument by remember { mutableStateOf<ScannedDocument?>(null) }
 
     val scanLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult()
@@ -85,6 +91,15 @@ fun ScanScreen() {
             onRotate = viewModel::rotatePage,
             onCancel = viewModel::cancelReview,
             onSave = viewModel::confirmReview
+        )
+        return
+    }
+
+    viewingDocument?.let { document ->
+        ScanPagesScreen(
+            document = document,
+            onBack = { viewingDocument = null },
+            onSharePage = { pagePath -> sharePage(context, pagePath) }
         )
         return
     }
@@ -124,6 +139,7 @@ fun ScanScreen() {
                         document = document,
                         onOpen = { openPdf(context, document) },
                         onShare = { sharePdf(context, document) },
+                        onViewPages = { viewingDocument = document },
                         onDelete = { viewModel.delete(document) }
                     )
                 }
@@ -201,6 +217,62 @@ private fun ScanReviewScreen(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ScanPagesScreen(
+    document: ScannedDocument,
+    onBack: () -> Unit,
+    onSharePage: (String) -> Unit
+) {
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text(document.name) },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.Default.ArrowBack, contentDescription = "Back")
+                    }
+                }
+            )
+        }
+    ) { padding ->
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(16.dp, padding.calculateTopPadding(), 16.dp, 16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            itemsIndexed(document.pagePaths) { index, pagePath ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(64.dp, 84.dp)
+                            .clip(RoundedCornerShape(6.dp))
+                    ) {
+                        AsyncImage(
+                            model = File(pagePath),
+                            contentDescription = "Page ${index + 1}",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                    Text(
+                        "Page ${index + 1}",
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(horizontal = 12.dp)
+                    )
+                    IconButton(onClick = { onSharePage(pagePath) }) {
+                        Icon(Icons.Default.Share, contentDescription = "Share page ${index + 1}")
+                    }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun EmptyScanState(padding: PaddingValues) {
     Box(
@@ -228,6 +300,7 @@ private fun ScanRow(
     document: ScannedDocument,
     onOpen: () -> Unit,
     onShare: () -> Unit,
+    onViewPages: () -> Unit,
     onDelete: () -> Unit
 ) {
     Row(
@@ -266,6 +339,9 @@ private fun ScanRow(
         IconButton(onClick = onOpen) {
             Icon(Icons.Default.PictureAsPdf, contentDescription = "Open PDF")
         }
+        IconButton(onClick = onViewPages) {
+            Icon(Icons.Default.PhotoLibrary, contentDescription = "View/share pages")
+        }
         IconButton(onClick = onShare) {
             Icon(Icons.Default.Share, contentDescription = "Share")
         }
@@ -294,4 +370,15 @@ private fun sharePdf(context: android.content.Context, document: ScannedDocument
         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     }
     context.startActivity(Intent.createChooser(intent, document.name))
+}
+
+private fun sharePage(context: android.content.Context, pagePath: String) {
+    val uri = ScanFileStore.shareUri(context, File(pagePath))
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = "image/jpeg"
+        putExtra(Intent.EXTRA_STREAM, uri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    context.startActivity(Intent.createChooser(intent, "Share page"))
 }

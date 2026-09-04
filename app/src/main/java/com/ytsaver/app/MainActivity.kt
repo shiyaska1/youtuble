@@ -52,6 +52,7 @@ import com.ytsaver.app.ui.home.HomeScreen
 import com.ytsaver.app.ui.library.LibraryScreen
 import com.ytsaver.app.ui.nav.ContactBanner
 import com.ytsaver.app.ui.player.PipState
+import com.ytsaver.app.ui.browser.BrowserScreen
 import com.ytsaver.app.ui.player.PlayerScreen
 import com.ytsaver.app.ui.record.RecordScreen
 import com.ytsaver.app.ui.scan.ScanScreen
@@ -157,8 +158,12 @@ private fun AppRoot() {
                         onOpenVideo = { queue, startIndex, loop ->
                             videoRequest = VideoQueueRequest(queue, startIndex, loop)
                             navController.navigate("player")
-                        }
+                        },
+                        onOpenBrowser = { navController.navigate("browser") }
                     )
+                }
+                composable("browser") {
+                    BrowserScreen(onBack = { navController.popBackStack() })
                 }
                 composable("player") {
                     val request = videoRequest
@@ -180,7 +185,7 @@ private fun AppRoot() {
 private data class VideoQueueRequest(val queue: List<SavedMedia>, val startIndex: Int, val loop: Boolean)
 
 @Composable
-private fun MainScaffold(onOpenVideo: (List<SavedMedia>, Int, Boolean) -> Unit) {
+private fun MainScaffold(onOpenVideo: (List<SavedMedia>, Int, Boolean) -> Unit, onOpenBrowser: () -> Unit) {
     var selectedTab by remember { mutableStateOf(0) }
 
     Scaffold(
@@ -215,7 +220,7 @@ private fun MainScaffold(onOpenVideo: (List<SavedMedia>, Int, Boolean) -> Unit) 
     ) { padding ->
         Box(modifier = Modifier.fillMaxSize().padding(padding)) {
             when (selectedTab) {
-                0 -> HomeScreen()
+                0 -> HomeScreen(onOpenBrowser = onOpenBrowser)
                 1 -> LibraryScreen(onOpenVideo = onOpenVideo)
                 2 -> ScanScreen()
                 else -> RecordScreen()

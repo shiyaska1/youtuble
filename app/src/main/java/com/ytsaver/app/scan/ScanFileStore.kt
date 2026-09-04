@@ -17,20 +17,27 @@ import java.util.Locale
 /** One captured page: the scanner's transient image Uri, plus any extra rotation the user applied during review. */
 data class ScanPage(val uri: Uri, val rotationDegrees: Int = 0)
 
+/** Everything written to disk for one saved scan. */
+data class SavedScan(val pdfFile: File, val thumbnailFile: File, val pageFiles: List<File>)
+
 /**
- * Builds the final PDF/thumbnail from the scanner's page images ourselves (instead of using
- * Play Services' own PDF export) so every page's EXIF rotation is actually applied to the
- * pixels — the scanner sometimes tags a page's orientation in EXIF without baking it in,
- * which otherwise shows up as random landscape/upside-down pages — and so the user's manual
- * per-page rotation from the review screen is reflected in the saved file.
+ * Builds the final PDF, thumbnail, and standalone per-page JPGs from the scanner's page images
+ * ourselves (instead of using Play Services' own PDF export) so every page's EXIF rotation is
+ * actually applied to the pixels — the scanner sometimes tags a page's orientation in EXIF
+ * without baking it in, which otherwise shows up as random landscape/upside-down pages — and so
+ * the user's manual per-page rotation from the review screen is reflected in the saved files.
+ * Saving each page as its own JPG (not just bundled in the PDF) lets a single page be shared on
+ * its own later.
  */
 object ScanFileStore {
 
     fun newBaseName(): String =
         "Scan-" + SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
 
-    fun writePdf(context: Context, pages: List<ScanPage>, baseName: String): File {
-        val file = uniqueFile(scansDir(context), baseName, "pdf")
+    fun save(context: Context, pages: List<ScanPage>, baseName: String): SavedScan {
+        val pdfFile = uniqueFile(scansDir(context), baseName, "pdf")
+        val pageFiles = mutableListOf<File>()
+        var thumbnailFile: File? = null
         val document = PdfDocument()
         try {
             pages.forEachIndexed { index, page ->
@@ -40,38 +47,40 @@ object ScanFileStore {
                     val pdfPage = document.startPage(pageInfo)
                     pdfPage.canvas.drawBitmap(bitmap, 0f, 0f, null)
                     document.finishPage(pdfPage)
+
+                    val pageFile = uniqueFile(pagesDir(context, baseName), "page-${index + 1}", "jpg")
+                    FileOutputStream(pageFile).use { bitmap.compress(Bitmap.CompressFormat.JPEG, 92, it) }
+                    pageFiles += pageFile
+
+                    if (index == 0) {
+                        thumbnailFile = writeScaledJpeg(bitmap, uniqueFile(thumbsDir(context), baseName, "jpg"))
+                    }
                 } finally {
                     bitmap.recycle()
                 }
             }
-            FileOutputStream(file).use { document.writeTo(it) }
+            FileOutputStream(pdfFile).use { document.writeTo(it) }
         } finally {
             document.close()
         }
-        return file
+        return SavedScan(pdfFile, thumbnailFile ?: pdfFile, pageFiles)
     }
 
-    fun writeThumbnail(context: Context, page: ScanPage, baseName: String): File {
-        val file = uniqueFile(thumbsDir(context), baseName, "jpg")
-        val bitmap = loadUprightBitmap(context, page)
+    private fun writeScaledJpeg(bitmap: Bitmap, file: File): File {
+        val maxDim = 480
+        val scale = maxDim.toFloat() / maxOf(bitmap.width, bitmap.height)
+        val scaled = if (scale < 1f) {
+            Bitmap.createScaledBitmap(
+                bitmap,
+                (bitmap.width * scale).toInt().coerceAtLeast(1),
+                (bitmap.height * scale).toInt().coerceAtLeast(1),
+                true
+            )
+        } else bitmap
         try {
-            val maxDim = 480
-            val scale = maxDim.toFloat() / maxOf(bitmap.width, bitmap.height)
-            val scaled = if (scale < 1f) {
-                Bitmap.createScaledBitmap(
-                    bitmap,
-                    (bitmap.width * scale).toInt().coerceAtLeast(1),
-                    (bitmap.height * scale).toInt().coerceAtLeast(1),
-                    true
-                )
-            } else bitmap
-            try {
-                FileOutputStream(file).use { scaled.compress(Bitmap.CompressFormat.JPEG, 85, it) }
-            } finally {
-                if (scaled !== bitmap) scaled.recycle()
-            }
+            FileOutputStream(file).use { scaled.compress(Bitmap.CompressFormat.JPEG, 85, it) }
         } finally {
-            bitmap.recycle()
+            if (scaled !== bitmap) scaled.recycle()
         }
         return file
     }
@@ -102,9 +111,12 @@ object ScanFileStore {
     fun shareUri(context: Context, file: File): Uri =
         FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
 
-    fun delete(filePath: String, thumbnailPath: String?) {
+    fun delete(filePath: String, thumbnailPath: String?, pagePaths: List<String> = emptyList()) {
         File(filePath).delete()
         thumbnailPath?.let { File(it).delete() }
+        pagePaths.forEach { File(it).delete() }
+        // Each scan's pages live in their own subfolder (see pagesDir()); remove it once empty.
+        pagePaths.firstOrNull()?.let { File(it).parentFile }?.takeIf { it.list()?.isEmpty() == true }?.delete()
     }
 
     private fun scansDir(context: Context): File =
@@ -112,6 +124,9 @@ object ScanFileStore {
 
     private fun thumbsDir(context: Context): File =
         File(scansDir(context), "thumbs").apply { mkdirs() }
+
+    private fun pagesDir(context: Context, baseName: String): File =
+        File(scansDir(context), "pages/$baseName").apply { mkdirs() }
 
     private fun uniqueFile(dir: File, baseName: String, extension: String): File {
         var candidate = File(dir, "$baseName.$extension")

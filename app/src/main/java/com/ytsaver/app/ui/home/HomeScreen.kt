@@ -9,12 +9,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Public
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
@@ -38,7 +40,7 @@ import coil.compose.AsyncImage
 import com.ytsaver.app.data.MediaType
 
 @Composable
-fun HomeScreen(viewModel: HomeViewModel = viewModel()) {
+fun HomeScreen(viewModel: HomeViewModel = viewModel(), onOpenBrowser: () -> Unit = {}) {
     val state by viewModel.uiState.collectAsState()
     val progress by viewModel.downloadProgress.collectAsState()
     val queuedDownloads by viewModel.queuedDownloads.collectAsState()
@@ -66,6 +68,12 @@ fun HomeScreen(viewModel: HomeViewModel = viewModel()) {
                 IconButton(onClick = viewModel::addToQueue) {
                     Icon(Icons.Default.Add, contentDescription = "Add to queue")
                 }
+            }
+
+            TextButton(onClick = onOpenBrowser) {
+                Icon(Icons.Default.Public, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Can't paste a direct link? Browse the site and find it here")
             }
 
             progress?.let { p ->

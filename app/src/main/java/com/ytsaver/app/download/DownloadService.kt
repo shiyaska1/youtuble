@@ -69,15 +69,7 @@ class DownloadService : Service() {
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .addInterceptor { chain ->
-            val request = chain.request()
-            // Same hotlink-protection workaround as DirectLinkFetcher: claim the file's own
-            // origin as the referer, since some hosts otherwise refuse the request outright.
-            chain.proceed(
-                request.newBuilder()
-                    .header("User-Agent", BROWSER_USER_AGENT)
-                    .header("Referer", "${request.url.scheme}://${request.url.host}/")
-                    .build()
-            )
+            chain.proceed(chain.request().newBuilder().header("User-Agent", BROWSER_USER_AGENT).build())
         }
         .build()
 

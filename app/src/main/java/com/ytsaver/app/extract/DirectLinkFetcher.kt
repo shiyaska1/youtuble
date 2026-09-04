@@ -18,18 +18,7 @@ object DirectLinkFetcher {
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .addInterceptor { chain ->
-            val request = chain.request()
-            // Many hosts hotlink-protect their media: they check that the request's Referer
-            // is a page on their own site before serving it, and otherwise answer with an
-            // HTML error page instead (still 200/206, which is what made downloads silently
-            // save an unplayable file). Claiming the file's own origin as the referer, the
-            // way a browser would when playing it embedded on that site, satisfies that check.
-            chain.proceed(
-                request.newBuilder()
-                    .header("User-Agent", BROWSER_USER_AGENT)
-                    .header("Referer", "${request.url.scheme}://${request.url.host}/")
-                    .build()
-            )
+            chain.proceed(chain.request().newBuilder().header("User-Agent", BROWSER_USER_AGENT).build())
         }
         .build()
 
@@ -38,18 +27,11 @@ object DirectLinkFetcher {
         return lower.contains("youtube.com") || lower.contains("youtu.be")
     }
 
-    private val NON_MEDIA_CONTENT_TYPES = listOf("text/", "application/json", "application/xml", "application/xhtml")
-
     suspend fun fetch(rawUrl: String): Result<FetchedStream> = withContext(Dispatchers.IO) {
         runCatching {
             val url = rawUrl.trim()
             val headers = probeHeaders(url)
             val contentType = headers["Content-Type"]?.substringBefore(';')?.trim()?.lowercase() ?: "application/octet-stream"
-            // A page (HTML/JSON/etc.) instead of the file itself means the link doesn't point
-            // straight at the media — saving it anyway would silently produce an unplayable file.
-            if (NON_MEDIA_CONTENT_TYPES.any { contentType.startsWith(it) }) {
-                throw java.io.IOException("That link doesn't point directly at a video or audio file")
-            }
             val isAudio = contentType.startsWith("audio/")
 
             val option = MediaOption(

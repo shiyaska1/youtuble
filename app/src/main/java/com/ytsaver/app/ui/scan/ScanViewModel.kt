@@ -86,16 +86,16 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
             val context = getApplication<YtSaverApp>()
             val baseName = ScanFileStore.newBaseName()
             val scanPages = pages.map { ScanPage(it.uri, it.rotationDegrees) }
-            val pdfFile = ScanFileStore.writePdf(context, scanPages, baseName)
-            val thumbFile = ScanFileStore.writeThumbnail(context, scanPages.first(), baseName)
+            val saved = ScanFileStore.save(context, scanPages, baseName)
 
             database.scannedDocumentDao().insert(
                 ScannedDocument(
                     name = baseName,
                     pageCount = scanPages.size,
-                    filePath = pdfFile.absolutePath,
-                    thumbnailPath = thumbFile.absolutePath,
-                    createdAt = System.currentTimeMillis()
+                    filePath = saved.pdfFile.absolutePath,
+                    thumbnailPath = saved.thumbnailFile.absolutePath,
+                    createdAt = System.currentTimeMillis(),
+                    pagePaths = saved.pageFiles.map { it.absolutePath }
                 )
             )
             _reviewPages.value = null
@@ -105,7 +105,7 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
 
     fun delete(document: ScannedDocument) {
         viewModelScope.launch(Dispatchers.IO) {
-            ScanFileStore.delete(document.filePath, document.thumbnailPath)
+            ScanFileStore.delete(document.filePath, document.thumbnailPath, document.pagePaths)
             database.scannedDocumentDao().delete(document)
         }
     }

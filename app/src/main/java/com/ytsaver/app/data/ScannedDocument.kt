@@ -10,5 +10,7 @@ data class ScannedDocument(
     val pageCount: Int,
     val filePath: String,
     val thumbnailPath: String?,
-    val createdAt: Long
+    val createdAt: Long,
+    /** Each page's own standalone JPG, in order, so a single page can be shared without the whole PDF. */
+    val pagePaths: List<String> = emptyList()
 )

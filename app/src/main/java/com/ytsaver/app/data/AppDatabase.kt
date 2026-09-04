@@ -108,9 +108,15 @@ private val MIGRATION_4_5 = object : Migration(4, 5) {
     }
 }
 
+private val MIGRATION_5_6 = object : Migration(5, 6) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE scanned_documents ADD COLUMN pagePaths TEXT NOT NULL DEFAULT ''")
+    }
+}
+
 @Database(
     entities = [SavedMedia::class, MediaCategory::class, ScannedDocument::class],
-    version = 5,
+    version = 6,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
@@ -127,7 +133,7 @@ abstract class AppDatabase : RoomDatabase() {
                 AppDatabase::class.java,
                 "ytsaver.db"
             )
-                .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                 // Covers anyone still on the pre-migration schema (version 1) — everyone on
                 // version 2+ goes through the real migration above and keeps their library.
                 .fallbackToDestructiveMigration()
