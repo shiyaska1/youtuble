@@ -16,6 +16,7 @@ import com.ytsaver.app.data.MediaAccess
 import com.ytsaver.app.data.MediaType
 import com.ytsaver.app.data.PublicMediaStore
 import com.ytsaver.app.data.SavedMedia
+import com.ytsaver.app.extract.BROWSER_USER_AGENT
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -67,6 +68,9 @@ class DownloadService : Service() {
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS)
+        .addInterceptor { chain ->
+            chain.proceed(chain.request().newBuilder().header("User-Agent", BROWSER_USER_AGENT).build())
+        }
         .build()
 
     override fun onCreate() {
