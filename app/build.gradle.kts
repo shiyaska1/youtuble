@@ -6,11 +6,11 @@ plugins {
 }
 
 android {
-    namespace = "com.ytsaver.app"
+    namespace = "com.mobicareapp"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.ytsaver.app"
+        applicationId = "com.mobicareapp"
         minSdk = 26
         targetSdk = 34
         versionCode = 1
