@@ -8,6 +8,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.Message
 import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -131,6 +132,7 @@ fun BrowserScreen(onBack: () -> Unit) {
     val sizes = remember { mutableStateMapOf<String, Long?>() }
     val hlsSegmentCounts = remember { mutableStateMapOf<String, Int?>() }
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
+    val currentPageUrl = remember { java.util.concurrent.atomic.AtomicReference<String?>(null) }
     var popupWebView by remember { mutableStateOf<WebView?>(null) }
     var desktopMode by remember { mutableStateOf(false) }
     val progress by DownloadService.progress.collectAsState()
@@ -259,12 +261,14 @@ fun BrowserScreen(onBack: () -> Unit) {
                 factory = { ctx ->
                     WebView(ctx).apply {
                         configureAsRealBrowser(this)
-                        webViewClient = mediaSniffingWebViewClient(mainHandler, detected)
+                        webViewClient = mediaSniffingWebViewClient(mainHandler, detected, currentPageUrl)
                         webChromeClient = popupHostingWebChromeClient(
                             onPopupRequested = { popupWebView = it },
                             onPopupClosed = { popupWebView = null }
                         )
+                        addJavascriptInterface(ScrapedMediaBridge(mainHandler, detected, currentPageUrl), "YtSaverBridge")
                         startAutoSkipAdsLoop(this, mainHandler)
+                        startEmbeddedVideoExtractionLoop(this, mainHandler)
                     }
                 },
                 update = { webView ->
@@ -382,6 +386,90 @@ private fun startAutoSkipAdsLoop(webView: WebView, handler: Handler) {
     handler.postDelayed(runnable, AUTO_SKIP_AD_INTERVAL_MS)
 }
 
+// Facebook and Instagram play video through in-page JavaScript (Media Source Extensions) rather
+// than pointing a <video> tag at one loadable URL, so shouldInterceptRequest never sees a single
+// request for "the whole video" to sniff — only the small fragments the player happens to fetch
+// under the hood, which look complete on their own (their own Content-Length is accurate) but are
+// only a slice of the real thing. This instead digs the actual per-post video URL out of the
+// page's own embedded data: the JSON fields Facebook's server-rendered markup still carries for
+// unauthenticated/legacy clients, and the schema.org VideoObject JSON-LD block many post pages
+// (Facebook and Instagram alike) still embed for search engines, which points at a plain
+// progressive file instead of the fragmented stream the page itself plays. This is inherently a
+// best-effort scrape of an undocumented, unstable page structure — it can stop matching whenever
+// either site changes their markup, unlike the public, stable HLS .m3u8 playlists the download
+// path already understands.
+private const val EXTRACT_EMBEDDED_VIDEO_SCRIPT = """
+(function() {
+  try {
+    var seen = window.__ytsaverSeenUrls || (window.__ytsaverSeenUrls = {});
+    function report(url) {
+      if (!url || seen[url]) return;
+      seen[url] = true;
+      try { window.YtSaverBridge.reportVideoUrl(url); } catch (e) {}
+    }
+    function unescapeJson(s) {
+      try { return JSON.parse('"' + s + '"'); } catch (e) { return s.replace(/\\\//g, '/'); }
+    }
+    var html = document.documentElement.outerHTML;
+    var patterns = [
+      /"playable_url_quality_hd":"([^"]+)"/g,
+      /"playable_url":"([^"]+)"/g,
+      /"browser_native_hd_url":"([^"]+)"/g,
+      /"browser_native_sd_url":"([^"]+)"/g,
+      /"video_url":"([^"]+)"/g
+    ];
+    patterns.forEach(function(re) {
+      var m;
+      while ((m = re.exec(html)) !== null) { report(unescapeJson(m[1])); }
+    });
+    document.querySelectorAll('script[type="application/ld+json"]').forEach(function(node) {
+      try {
+        var data = JSON.parse(node.textContent);
+        var items = Array.isArray(data) ? data : [data];
+        items.forEach(function(item) {
+          var videos = item && item['@type'] === 'VideoObject'
+            ? [item]
+            : (item && item.video ? (Array.isArray(item.video) ? item.video : [item.video]) : []);
+          videos.forEach(function(v) { if (v && v.contentUrl) report(v.contentUrl); });
+        });
+      } catch (e) {}
+    });
+  } catch (e) {}
+})();
+"""
+private const val EXTRACT_EMBEDDED_VIDEO_INTERVAL_MS = 2000L
+
+private fun startEmbeddedVideoExtractionLoop(webView: WebView, handler: Handler) {
+    val runnable = object : Runnable {
+        override fun run() {
+            runCatching { webView.evaluateJavascript(EXTRACT_EMBEDDED_VIDEO_SCRIPT, null) }
+            handler.postDelayed(this, EXTRACT_EMBEDDED_VIDEO_INTERVAL_MS)
+        }
+    }
+    handler.postDelayed(runnable, EXTRACT_EMBEDDED_VIDEO_INTERVAL_MS)
+}
+
+/**
+ * Receives URLs found by [EXTRACT_EMBEDDED_VIDEO_SCRIPT]. JS run via evaluateJavascript has no
+ * way to return a value back to Kotlin, so the script calls into this bridge directly instead.
+ * Runs on a WebView-owned thread (not necessarily the UI thread), so it only touches thread-safe
+ * state and posts the actual list mutation back to [handler].
+ */
+private class ScrapedMediaBridge(
+    private val handler: Handler,
+    private val detected: androidx.compose.runtime.snapshots.SnapshotStateList<DetectedMedia>,
+    private val currentPageUrl: java.util.concurrent.atomic.AtomicReference<String?>
+) {
+    @JavascriptInterface
+    fun reportVideoUrl(url: String) {
+        val pageUrl = currentPageUrl.get()
+        val media = classifyMediaUrl(url, pageUrl) ?: DetectedMedia(url, MediaType.VIDEO, "mp4", "video/mp4", pageUrl)
+        handler.post {
+            if (detected.none { it.url == media.url }) detected.add(media)
+        }
+    }
+}
+
 private fun configureAsRealBrowser(webView: WebView) {
     val settings: WebSettings = webView.settings
     settings.javaScriptEnabled = true
@@ -408,14 +496,14 @@ private fun configureAsRealBrowser(webView: WebView) {
 
 private fun mediaSniffingWebViewClient(
     mainHandler: Handler,
-    detected: androidx.compose.runtime.snapshots.SnapshotStateList<DetectedMedia>
+    detected: androidx.compose.runtime.snapshots.SnapshotStateList<DetectedMedia>,
+    currentPageUrl: java.util.concurrent.atomic.AtomicReference<String?>
 ): WebViewClient = object : WebViewClient() {
     // shouldInterceptRequest fires on a background thread, but WebView.getUrl() (view.url) is
     // only safe to call on the thread that owns the WebView — calling it here crashed the app on
     // literally every request. onPageStarted *does* run on the main thread, so track the current
-    // page URL there instead of reading it off the WebView from the wrong thread.
-    private val currentPageUrl = java.util.concurrent.atomic.AtomicReference<String?>(null)
-
+    // page URL there instead of reading it off the WebView from the wrong thread. Shared with
+    // ScrapedMediaBridge so it can tag its own finds with the right referer too.
     override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {
         currentPageUrl.set(url)
     }
