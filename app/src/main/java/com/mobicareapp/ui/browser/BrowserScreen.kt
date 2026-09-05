@@ -247,7 +247,11 @@ fun BrowserScreen(onBack: () -> Unit) {
             }
 
             AndroidView(
-                modifier = Modifier.fillMaxSize(),
+                // Without weight(), this fillMaxSize() competes with the progress card and
+                // detected-media list above it for the Column's full height instead of just the
+                // space left over — the total ends up taller than the screen, clipping the
+                // WebView's bottom instead of properly sizing it to what's left.
+                modifier = Modifier.weight(1f).fillMaxWidth(),
                 factory = { ctx ->
                     WebView(ctx).apply {
                         configureAsRealBrowser(this)
