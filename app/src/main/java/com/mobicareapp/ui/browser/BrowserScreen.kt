@@ -1,6 +1,9 @@
 package com.mobicareapp.ui.browser
 
 import android.annotation.SuppressLint
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.os.Message
@@ -60,6 +63,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewFeature
 import com.mobicareapp.data.MediaType
@@ -285,7 +289,13 @@ fun BrowserScreen(onBack: () -> Unit) {
     // than navigating the current page — a bare WebView silently drops that. Hosting the popup's
     // WebView in its own dialog, on top of the page that requested it, is what lets it complete.
     popupWebView?.let { popup ->
-        Dialog(onDismissRequest = { popupWebView = null }) {
+        Dialog(
+            onDismissRequest = { popupWebView = null },
+            // Without this, the dialog window is capped to the platform's default dialog width
+            // (roughly wrap-content) instead of the full screen, so a popup sign-in page renders
+            // cramped into a small box rather than as a proper full-screen popup.
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
             Column(modifier = Modifier.fillMaxSize()) {
                 IconButton(onClick = { popupWebView = null }) {
                     Icon(Icons.Default.Close, contentDescription = "Close")
@@ -410,6 +420,9 @@ private fun mediaSniffingWebViewClient(
         currentPageUrl.set(url)
     }
 
+    override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean =
+        launchExternalUrlIfNeeded(view.context, request.url.toString())
+
     override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
         classifyMediaUrl(request.url.toString(), currentPageUrl.get())?.let { media ->
             mainHandler.post {
@@ -418,6 +431,27 @@ private fun mediaSniffingWebViewClient(
         }
         return super.shouldInterceptRequest(view, request)
     }
+}
+
+/**
+ * Some login/verification flows (Facebook's device-approval screen, payment redirects, etc.)
+ * hand off to an `intent://` URL or another non-http(s) scheme meant to launch a native app or
+ * system component instead of opening a new page/popup — a WebView can't render those itself,
+ * and without this it just silently does nothing when tapped, looking like the popup or
+ * redirect failed. Returns true (link handled) only when something was actually launched, so a
+ * plain http(s) navigation still falls through to the WebView as normal.
+ */
+private fun launchExternalUrlIfNeeded(context: Context, url: String): Boolean {
+    if (url.startsWith("http://") || url.startsWith("https://")) return false
+    return runCatching {
+        val intent = if (url.startsWith("intent://")) {
+            Intent.parseUri(url, Intent.URI_INTENT_SCHEME)
+        } else {
+            Intent(Intent.ACTION_VIEW, Uri.parse(url))
+        }
+        context.startActivity(intent)
+        true
+    }.getOrDefault(false)
 }
 
 private fun popupHostingWebChromeClient(
@@ -429,7 +463,10 @@ private fun popupHostingWebChromeClient(
 
         val popup = WebView(view.context)
         configureAsRealBrowser(popup)
-        popup.webViewClient = WebViewClient()
+        popup.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean =
+                launchExternalUrlIfNeeded(view.context, request.url.toString())
+        }
         popup.webChromeClient = object : WebChromeClient() {
             override fun onCloseWindow(window: WebView) {
                 onPopupClosed()
