@@ -10,8 +10,10 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -23,6 +25,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.CloudUpload
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MusicNote
@@ -33,6 +36,7 @@ import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
+import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -40,6 +44,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -67,6 +72,7 @@ import coil.compose.AsyncImage
 import com.mobicareapp.data.MediaCategory
 import com.mobicareapp.data.MediaType
 import com.mobicareapp.data.SavedMedia
+import com.mobicareapp.download.DownloadService
 import com.mobicareapp.playback.PlayerController
 import kotlinx.coroutines.launch
 import java.text.DateFormat
@@ -101,6 +107,8 @@ fun LibraryScreen(
     val snackbarMessage by viewModel.snackbarMessage.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val context = LocalContext.current
+    val downloadProgress by DownloadService.progress.collectAsState()
+    val queuedDownloads by DownloadService.queueSize.collectAsState()
 
     var pendingDelete by remember { mutableStateOf<SavedMedia?>(null) }
     var pendingBulkDelete by remember { mutableStateOf(false) }
@@ -365,6 +373,35 @@ fun LibraryScreen(
                     onDelete = { pendingBulkDelete = true },
                     onMove = { pendingMoveSelection = true }
                 )
+            }
+
+            downloadProgress?.let { p ->
+                Card(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                modifier = Modifier.weight(1f),
+                                text = if (p.done) {
+                                    if (p.error != null) "Failed: ${p.error}" else "Saved \"${p.caption}\""
+                                } else {
+                                    "Downloading \"${p.caption}\"…" + if (queuedDownloads > 1) " (${queuedDownloads - 1} more queued)" else ""
+                                }
+                            )
+                            if (p.done) {
+                                IconButton(onClick = { DownloadService.clearProgress() }) {
+                                    Icon(Icons.Default.Close, contentDescription = "Dismiss")
+                                }
+                            } else {
+                                TextButton(onClick = { DownloadService.cancelCurrent() }) { Text("Cancel") }
+                            }
+                        }
+                        if (!p.done) {
+                            Spacer(Modifier.height(8.dp))
+                            val fraction = if (p.totalBytes > 0) p.bytesDone.toFloat() / p.totalBytes else 0f
+                            LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
+                        }
+                    }
+                }
             }
 
             Box(modifier = Modifier.fillMaxSize()) {
