@@ -29,10 +29,12 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DesktopWindows
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PhoneAndroid
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -55,6 +57,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -66,11 +69,15 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewFeature
+import com.mobicareapp.YtSaverApp
+import com.mobicareapp.data.MediaAccess
 import com.mobicareapp.data.MediaType
+import com.mobicareapp.data.SavedMedia
 import com.mobicareapp.download.DownloadService
 import com.mobicareapp.download.HlsResolver
 import com.mobicareapp.extract.BROWSER_USER_AGENT
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -139,8 +146,12 @@ private object BrowserSession {
 @SuppressLint("SetJavaScriptEnabled")
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun BrowserScreen(onBack: () -> Unit) {
+fun BrowserScreen(
+    onBack: () -> Unit,
+    onOpenVideo: (queue: List<SavedMedia>, startIndex: Int, loop: Boolean) -> Unit = { _, _, _ -> }
+) {
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
     var addressText by BrowserSession::addressText
     var pendingUrl by remember { mutableStateOf<String?>(null) }
     val detected = BrowserSession.detected
@@ -213,6 +224,33 @@ fun BrowserScreen(onBack: () -> Unit) {
                             Spacer(Modifier.height(8.dp))
                             val fraction = if (p.totalBytes > 0) p.bytesDone.toFloat() / p.totalBytes else 0f
                             LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
+                        }
+                        // Lets you check the file actually saved correctly right away, and remove
+                        // it on the spot if it didn't, instead of having to go find it in Library.
+                        val saved = p.savedMedia
+                        if (p.done && p.error == null && saved != null) {
+                            Spacer(Modifier.height(8.dp))
+                            Row {
+                                if (saved.type == MediaType.VIDEO) {
+                                    TextButton(onClick = { onOpenVideo(listOf(saved), 0, false) }) {
+                                        Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("Play")
+                                    }
+                                    Spacer(Modifier.width(8.dp))
+                                }
+                                TextButton(onClick = {
+                                    coroutineScope.launch {
+                                        MediaAccess.delete(context, saved.filePath)
+                                        (context.applicationContext as YtSaverApp).database.savedMediaDao().delete(saved)
+                                        DownloadService.clearProgress()
+                                    }
+                                }) {
+                                    Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("Not OK, delete")
+                                }
+                            }
                         }
                     }
                 }
@@ -398,14 +436,18 @@ private fun DetectedMediaRow(
 
 // Looks for buttons/links that mention "skip" (by visible text, aria-label, class, or id — the
 // common ways an ad player marks its skip control) and clicks them. Scoped to
-// buttons/links/role="button" elements rather than every element on the page so it stays cheap
-// enough to poll repeatedly.
+// buttons/role="button" elements (plain <a> tags only count if given role="button", a common
+// pattern for custom ad-player controls) rather than every element on the page, both to stay
+// cheap enough to poll repeatedly and — more importantly — to leave plain links alone: a bare
+// <a>"Skip to content"</a> accessibility link matches "skip" too, and clicking it every 1.5s
+// looked like the whole page kept refreshing itself.
 private const val AUTO_SKIP_AD_SCRIPT = """
 (function() {
   try {
-    var els = document.querySelectorAll('button, [role="button"], a, [class*="skip" i], [id*="skip" i], [aria-label*="skip" i]');
+    var els = document.querySelectorAll('button, [role="button"], [class*="skip" i], [id*="skip" i], [aria-label*="skip" i]');
     for (var i = 0; i < els.length; i++) {
       var el = els[i];
+      if (el.tagName === 'A' && !el.getAttribute('role')) continue;
       var text = ((el.innerText || el.textContent || '') + ' ' + (el.getAttribute('aria-label') || '')).toLowerCase();
       var cls = (el.className || '').toString().toLowerCase();
       var id = (el.id || '').toLowerCase();

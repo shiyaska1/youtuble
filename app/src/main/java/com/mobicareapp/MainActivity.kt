@@ -168,7 +168,13 @@ private fun AppRoot() {
                     )
                 }
                 composable("browser") {
-                    BrowserScreen(onBack = { navController.popBackStack() })
+                    BrowserScreen(
+                        onBack = { navController.popBackStack() },
+                        onOpenVideo = { queue, startIndex, loop ->
+                            videoRequest = VideoQueueRequest(queue, startIndex, loop)
+                            navController.navigate("player")
+                        }
+                    )
                 }
                 composable("player") {
                     val request = videoRequest

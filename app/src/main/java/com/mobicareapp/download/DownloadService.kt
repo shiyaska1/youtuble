@@ -50,7 +50,8 @@ data class DownloadProgress(
     val bytesDone: Long,
     val totalBytes: Long,
     val done: Boolean = false,
-    val error: String? = null
+    val error: String? = null,
+    val savedMedia: SavedMedia? = null
 )
 
 private sealed class DownloadTarget {
@@ -261,20 +262,18 @@ class DownloadService : Service() {
             throw IOException("Connection was cut short (got ${formatMegabytes(sizeBytes)} of ${formatMegabytes(expectedBytes)} MB)")
         }
 
-        app.database.savedMediaDao().insert(
-            SavedMedia(
-                caption = request.caption,
-                sourceUrl = request.sourceUrl,
-                type = request.type,
-                filePath = storedPath,
-                fileName = fileName,
-                thumbnailUrl = request.thumbnailUrl,
-                sizeBytes = sizeBytes,
-                durationSeconds = request.durationSeconds,
-                createdAt = System.currentTimeMillis()
-            )
-        )
-        _progress.value = DownloadProgress(request.caption, sizeBytes, sizeBytes, done = true)
+        val savedMedia = SavedMedia(
+            caption = request.caption,
+            sourceUrl = request.sourceUrl,
+            type = request.type,
+            filePath = storedPath,
+            fileName = fileName,
+            thumbnailUrl = request.thumbnailUrl,
+            sizeBytes = sizeBytes,
+            durationSeconds = request.durationSeconds,
+            createdAt = System.currentTimeMillis()
+        ).let { it.copy(id = app.database.savedMediaDao().insert(it)) }
+        _progress.value = DownloadProgress(request.caption, sizeBytes, sizeBytes, done = true, savedMedia = savedMedia)
     }
 
     private fun formatMegabytes(bytes: Long): String = "%.1f".format(bytes / (1024.0 * 1024))
