@@ -8,7 +8,6 @@ import android.os.Handler
 import android.os.Looper
 import android.os.Message
 import android.webkit.CookieManager
-import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -110,6 +109,22 @@ private val probeClient = OkHttpClient.Builder()
     .build()
 
 /**
+ * Holds the Browse screen's state outside the composable itself so leaving the screen (back
+ * button, navigating to Library, etc.) and returning doesn't lose the current page, the
+ * detected-media list, or the address bar text — Compose disposes BrowserScreen's own `remember`
+ * state (and the WebView it hosts) the moment its route leaves composition, which otherwise made
+ * every return to Browse start over from a blank page.
+ */
+private object BrowserSession {
+    var addressText by mutableStateOf("")
+    var desktopMode by mutableStateOf(false)
+    val detected = mutableStateListOf<DetectedMedia>()
+    val sizes = mutableStateMapOf<String, Long?>()
+    val hlsSegmentCounts = mutableStateMapOf<String, Int?>()
+    val currentPageUrl = java.util.concurrent.atomic.AtomicReference<String?>(null)
+}
+
+/**
  * Many sites embed their video/audio behind a normal webpage (no direct file link, no YouTube-
  * style page we can extract from) — the only way in is to actually load the page and watch what
  * it fetches. This wraps a WebView configured to behave like real mobile Chrome (so things like
@@ -126,15 +141,15 @@ private val probeClient = OkHttpClient.Builder()
 @Composable
 fun BrowserScreen(onBack: () -> Unit) {
     val context = LocalContext.current
-    var addressText by remember { mutableStateOf("") }
+    var addressText by BrowserSession::addressText
     var pendingUrl by remember { mutableStateOf<String?>(null) }
-    val detected = remember { mutableStateListOf<DetectedMedia>() }
-    val sizes = remember { mutableStateMapOf<String, Long?>() }
-    val hlsSegmentCounts = remember { mutableStateMapOf<String, Int?>() }
+    val detected = BrowserSession.detected
+    val sizes = BrowserSession.sizes
+    val hlsSegmentCounts = BrowserSession.hlsSegmentCounts
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
-    val currentPageUrl = remember { java.util.concurrent.atomic.AtomicReference<String?>(null) }
+    val currentPageUrl = BrowserSession.currentPageUrl
     var popupWebView by remember { mutableStateOf<WebView?>(null) }
-    var desktopMode by remember { mutableStateOf(false) }
+    var desktopMode by BrowserSession::desktopMode
     val progress by DownloadService.progress.collectAsState()
     val queuedDownloads by DownloadService.queueSize.collectAsState()
 
@@ -283,9 +298,11 @@ fun BrowserScreen(onBack: () -> Unit) {
                             onPopupRequested = { popupWebView = it },
                             onPopupClosed = { popupWebView = null }
                         )
-                        addJavascriptInterface(ScrapedMediaBridge(mainHandler, detected, currentPageUrl), "YtSaverBridge")
                         startAutoSkipAdsLoop(this, mainHandler)
-                        startEmbeddedVideoExtractionLoop(this, mainHandler)
+                        // Leaving Browse (back button, opening Library, etc.) disposes this whole
+                        // composable, so a fresh WebView is created next time it's opened — reload
+                        // whatever page was open before instead of starting blank every time.
+                        currentPageUrl.get()?.let { loadUrl(it) }
                     }
                 },
                 update = { webView ->
@@ -410,90 +427,6 @@ private fun startAutoSkipAdsLoop(webView: WebView, handler: Handler) {
         }
     }
     handler.postDelayed(runnable, AUTO_SKIP_AD_INTERVAL_MS)
-}
-
-// Facebook and Instagram play video through in-page JavaScript (Media Source Extensions) rather
-// than pointing a <video> tag at one loadable URL, so shouldInterceptRequest never sees a single
-// request for "the whole video" to sniff — only the small fragments the player happens to fetch
-// under the hood, which look complete on their own (their own Content-Length is accurate) but are
-// only a slice of the real thing. This instead digs the actual per-post video URL out of the
-// page's own embedded data: the JSON fields Facebook's server-rendered markup still carries for
-// unauthenticated/legacy clients, and the schema.org VideoObject JSON-LD block many post pages
-// (Facebook and Instagram alike) still embed for search engines, which points at a plain
-// progressive file instead of the fragmented stream the page itself plays. This is inherently a
-// best-effort scrape of an undocumented, unstable page structure — it can stop matching whenever
-// either site changes their markup, unlike the public, stable HLS .m3u8 playlists the download
-// path already understands.
-private const val EXTRACT_EMBEDDED_VIDEO_SCRIPT = """
-(function() {
-  try {
-    var seen = window.__ytsaverSeenUrls || (window.__ytsaverSeenUrls = {});
-    function report(url) {
-      if (!url || seen[url]) return;
-      seen[url] = true;
-      try { window.YtSaverBridge.reportVideoUrl(url); } catch (e) {}
-    }
-    function unescapeJson(s) {
-      try { return JSON.parse('"' + s + '"'); } catch (e) { return s.replace(/\\\//g, '/'); }
-    }
-    var html = document.documentElement.outerHTML;
-    var patterns = [
-      /"playable_url_quality_hd":"([^"]+)"/g,
-      /"playable_url":"([^"]+)"/g,
-      /"browser_native_hd_url":"([^"]+)"/g,
-      /"browser_native_sd_url":"([^"]+)"/g,
-      /"video_url":"([^"]+)"/g
-    ];
-    patterns.forEach(function(re) {
-      var m;
-      while ((m = re.exec(html)) !== null) { report(unescapeJson(m[1])); }
-    });
-    document.querySelectorAll('script[type="application/ld+json"]').forEach(function(node) {
-      try {
-        var data = JSON.parse(node.textContent);
-        var items = Array.isArray(data) ? data : [data];
-        items.forEach(function(item) {
-          var videos = item && item['@type'] === 'VideoObject'
-            ? [item]
-            : (item && item.video ? (Array.isArray(item.video) ? item.video : [item.video]) : []);
-          videos.forEach(function(v) { if (v && v.contentUrl) report(v.contentUrl); });
-        });
-      } catch (e) {}
-    });
-  } catch (e) {}
-})();
-"""
-private const val EXTRACT_EMBEDDED_VIDEO_INTERVAL_MS = 2000L
-
-private fun startEmbeddedVideoExtractionLoop(webView: WebView, handler: Handler) {
-    val runnable = object : Runnable {
-        override fun run() {
-            runCatching { webView.evaluateJavascript(EXTRACT_EMBEDDED_VIDEO_SCRIPT, null) }
-            handler.postDelayed(this, EXTRACT_EMBEDDED_VIDEO_INTERVAL_MS)
-        }
-    }
-    handler.postDelayed(runnable, EXTRACT_EMBEDDED_VIDEO_INTERVAL_MS)
-}
-
-/**
- * Receives URLs found by [EXTRACT_EMBEDDED_VIDEO_SCRIPT]. JS run via evaluateJavascript has no
- * way to return a value back to Kotlin, so the script calls into this bridge directly instead.
- * Runs on a WebView-owned thread (not necessarily the UI thread), so it only touches thread-safe
- * state and posts the actual list mutation back to [handler].
- */
-private class ScrapedMediaBridge(
-    private val handler: Handler,
-    private val detected: androidx.compose.runtime.snapshots.SnapshotStateList<DetectedMedia>,
-    private val currentPageUrl: java.util.concurrent.atomic.AtomicReference<String?>
-) {
-    @JavascriptInterface
-    fun reportVideoUrl(url: String) {
-        val pageUrl = currentPageUrl.get()
-        val media = classifyMediaUrl(url, pageUrl) ?: DetectedMedia(url, MediaType.VIDEO, "mp4", "video/mp4", pageUrl)
-        handler.post {
-            if (detected.none { mediaContentKey(it.url) == mediaContentKey(media.url) }) detected.add(media)
-        }
-    }
 }
 
 private fun configureAsRealBrowser(webView: WebView) {
