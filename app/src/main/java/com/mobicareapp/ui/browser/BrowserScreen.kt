@@ -204,6 +204,22 @@ fun BrowserScreen(onBack: () -> Unit) {
             }
 
             if (detected.isNotEmpty()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        modifier = Modifier.weight(1f),
+                        text = "${detected.size} detected",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    TextButton(onClick = {
+                        detected.clear()
+                        sizes.clear()
+                        hlsSegmentCounts.clear()
+                    }) { Text("Clear") }
+                }
                 LazyColumn(
                     modifier = Modifier.fillMaxWidth().height(if (detected.size > 3) 260.dp else (detected.size * 84).dp),
                     contentPadding = androidx.compose.foundation.layout.PaddingValues(8.dp),
@@ -246,7 +262,8 @@ fun BrowserScreen(onBack: () -> Unit) {
                                     referer = media.pageUrl,
                                     isHls = media.isHls
                                 )
-                            }
+                            },
+                            onDismiss = { detected.remove(media) }
                         )
                     }
                 }
@@ -311,7 +328,13 @@ fun BrowserScreen(onBack: () -> Unit) {
 }
 
 @Composable
-private fun DetectedMediaRow(media: DetectedMedia, sizeBytes: Long?, hlsSegmentCount: Int?, onDownload: () -> Unit) {
+private fun DetectedMediaRow(
+    media: DetectedMedia,
+    sizeBytes: Long?,
+    hlsSegmentCount: Int?,
+    onDownload: () -> Unit,
+    onDismiss: () -> Unit
+) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(12.dp),
@@ -348,6 +371,9 @@ private fun DetectedMediaRow(media: DetectedMedia, sizeBytes: Long?, hlsSegmentC
                 Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(Modifier.width(4.dp))
                 Text("Save")
+            }
+            IconButton(onClick = onDismiss) {
+                Icon(Icons.Default.Close, contentDescription = "Not this one")
             }
         }
     }
@@ -465,7 +491,7 @@ private class ScrapedMediaBridge(
         val pageUrl = currentPageUrl.get()
         val media = classifyMediaUrl(url, pageUrl) ?: DetectedMedia(url, MediaType.VIDEO, "mp4", "video/mp4", pageUrl)
         handler.post {
-            if (detected.none { it.url == media.url }) detected.add(media)
+            if (detected.none { mediaContentKey(it.url) == mediaContentKey(media.url) }) detected.add(media)
         }
     }
 }
@@ -514,7 +540,7 @@ private fun mediaSniffingWebViewClient(
     override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
         classifyMediaUrl(request.url.toString(), currentPageUrl.get())?.let { media ->
             mainHandler.post {
-                if (detected.none { it.url == media.url }) detected.add(media)
+                if (detected.none { mediaContentKey(it.url) == mediaContentKey(media.url) }) detected.add(media)
             }
         }
         return super.shouldInterceptRequest(view, request)
@@ -594,6 +620,14 @@ private fun normalizeUrl(input: String): String {
     val trimmed = input.trim()
     return if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) trimmed else "https://$trimmed"
 }
+
+/**
+ * The same underlying video is often caught twice under two different-looking URLs — once via
+ * network sniffing, once via [EXTRACT_EMBEDDED_VIDEO_SCRIPT] finding another quality field for
+ * the same post — that only differ in per-request signed-token query parameters. Comparing on
+ * the path instead of the full URL collapses those into one entry in the detected-media list.
+ */
+private fun mediaContentKey(url: String): String = url.substringBefore('?')
 
 private fun classifyMediaUrl(url: String, pageUrl: String?): DetectedMedia? {
     val path = url.substringBefore('?').substringAfterLast('/')
