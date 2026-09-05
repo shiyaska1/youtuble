@@ -60,37 +60,6 @@ private sealed class DownloadTarget {
 }
 
 /**
- * Tracks progress across retry attempts within one [DownloadService.runDownload] call, so a
- * retry after a transient failure (e.g. a brief network hiccup while the app is backgrounded)
- * can resume from where it left off instead of restarting the whole download and visibly
- * resetting progress back to 0%.
- */
-private class DownloadState {
-    var target: DownloadTarget? = null
-
-    // Ranged/chunked path (downloadToTarget).
-    var totalBytes: Long? = null
-    var probeDone: Boolean = false
-    var probedSize: Long = 0L
-    // Range starts already written to disk. A set rather than a byte cursor because ranges are
-    // fetched concurrently and can finish out of order — a cursor could skip a still-missing
-    // range or re-fetch one that already landed.
-    val completedRanges: MutableSet<Long> = java.util.concurrent.ConcurrentHashMap.newKeySet()
-
-    // HLS path (downloadHlsToTarget). Segments are written strictly in order within each
-    // concurrent batch, so a simple running counter is safe here.
-    var completedSegments: Int = 0
-
-    // Display-only estimate of bytes written so far; shown in the notification/progress UI.
-    var bytesDone: Long = 0L
-
-    // Set once the target has been finalized (MediaStore) or fully written (legacy file) and
-    // the post-download size checks are running — a failure past this point means the target
-    // itself is suspect, so the next attempt starts over with a fresh one instead of resuming.
-    var finishedWriting: Boolean = false
-}
-
-/**
  * Downloads run through an internal queue (not straight in onStartCommand)
  * so pasting several links in a row while on Wi-Fi queues them all up and
  * they save one after another, instead of racing each other over one shared
@@ -150,72 +119,40 @@ class DownloadService : Service() {
     /**
      * Retries a download that came back truncated (some CDNs cut a long-lived connection early
      * under load, which the sequential fallback path can't tell apart from a real EOF) up to a
-     * few times before giving up. Progress carries over between attempts via [DownloadState] —
-     * a retry resumes from the last segment/range that made it to disk instead of restarting
-     * from 0%, which used to make backgrounding the app during a transient network hiccup look
-     * like the whole download had started over.
+     * few times before giving up — each attempt starts over with a fresh target rather than
+     * trying to resume, since the sequential fallback path has no Range support to resume with.
      */
     private suspend fun runDownload(request: DownloadRequest) {
-        val state = DownloadState()
         var lastError: Exception? = null
-        var succeeded = false
-        try {
-            for (attempt in 1..MAX_ATTEMPTS) {
-                try {
-                    attemptDownload(request, state)
-                    succeeded = true
-                    break
-                } catch (e: kotlinx.coroutines.CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    // The Cancel button surfaces here as a plain IOException ("Canceled") from OkHttp,
-                    // not a CancellationException, since it comes from client.dispatcher.cancelAll()
-                    // rather than coroutine cancellation alone — check the job explicitly so a
-                    // deliberate cancel doesn't get treated as a transient failure worth retrying.
-                    kotlin.coroutines.coroutineContext.ensureActive()
-                    lastError = e
-                    if (state.finishedWriting) {
-                        // The failure happened after this target was already finalized/fully
-                        // written (e.g. the post-download truncation check) — resuming into an
-                        // already-finalized target doesn't make sense, so start clean next time.
-                        discardTarget(state.target)
-                        state.target = null
-                        state.totalBytes = null
-                        state.probeDone = false
-                        state.probedSize = 0L
-                        state.completedRanges.clear()
-                        state.completedSegments = 0
-                        state.bytesDone = 0L
-                        state.finishedWriting = false
-                    }
-                }
+        repeat(MAX_ATTEMPTS) {
+            try {
+                attemptDownload(request)
+                return
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // The Cancel button surfaces here as a plain IOException ("Canceled") from OkHttp,
+                // not a CancellationException, since it comes from client.dispatcher.cancelAll()
+                // rather than coroutine cancellation alone — check the job explicitly so a
+                // deliberate cancel doesn't get treated as a transient failure worth retrying.
+                kotlin.coroutines.coroutineContext.ensureActive()
+                lastError = e
             }
-        } finally {
-            if (!succeeded) discardTarget(state.target)
         }
-        if (!succeeded) {
-            _progress.value = DownloadProgress(
-                request.caption, 0, 0, done = true,
-                error = lastError?.message ?: "Download failed"
-            )
-        }
-    }
-
-    private fun discardTarget(target: DownloadTarget?) {
-        when (target) {
-            is DownloadTarget.LegacyFile -> target.file.delete()
-            is DownloadTarget.MediaStoreUri -> PublicMediaStore.abandon(this, target.uri)
-            null -> Unit
-        }
+        _progress.value = DownloadProgress(
+            request.caption, 0, 0, done = true,
+            error = lastError?.message ?: "Download failed"
+        )
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)
-    private suspend fun attemptDownload(request: DownloadRequest, state: DownloadState) {
+    private suspend fun attemptDownload(request: DownloadRequest) {
         val app = application as YtSaverApp
         val fileName = "${sanitizeFileName(request.caption)}.${request.fileExtension}"
+        var target: DownloadTarget? = null
 
-        if (state.target == null) {
-            state.target = if (PublicMediaStore.isSupported()) {
+        try {
+            target = if (PublicMediaStore.isSupported()) {
                 DownloadTarget.MediaStoreUri(
                     PublicMediaStore.createPendingTarget(this, request.type, fileName, request.mimeType)
                 )
@@ -223,57 +160,64 @@ class DownloadService : Service() {
                 val dir = legacyMediaDir(request.type)
                 DownloadTarget.LegacyFile(uniqueFile(dir, sanitizeFileName(request.caption), request.fileExtension))
             }
-        }
-        val target = state.target!!
 
-        _progress.value = DownloadProgress(request.caption, state.bytesDone, state.totalBytes ?: 0)
-        val expectedBytes = if (request.isHls) {
-            downloadHlsToTarget(target, request.streamUrl, request.caption, request.cookie, request.referer, state)
-            null
-        } else {
-            downloadToTarget(target, request.streamUrl, request.caption, request.cookie, request.referer, state)
-        }
-
-        val storedPath: String
-        val sizeBytes: Long
-        when (target) {
-            is DownloadTarget.MediaStoreUri -> {
-                PublicMediaStore.finalize(this, target.uri)
-                state.finishedWriting = true
-                storedPath = target.uri.toString()
-                sizeBytes = MediaAccess.length(this, storedPath)
+            val resolvedTarget = target
+            _progress.value = DownloadProgress(request.caption, 0, 0)
+            val expectedBytes = if (request.isHls) {
+                downloadHlsToTarget(resolvedTarget, request.streamUrl, request.caption, request.cookie, request.referer)
+                null
+            } else {
+                downloadToTarget(resolvedTarget, request.streamUrl, request.caption, request.cookie, request.referer)
             }
-            is DownloadTarget.LegacyFile -> {
-                state.finishedWriting = true
-                storedPath = target.file.absolutePath
-                sizeBytes = target.file.length()
+
+            val storedPath: String
+            val sizeBytes: Long
+            when (resolvedTarget) {
+                is DownloadTarget.MediaStoreUri -> {
+                    PublicMediaStore.finalize(this, resolvedTarget.uri)
+                    storedPath = resolvedTarget.uri.toString()
+                    sizeBytes = MediaAccess.length(this, storedPath)
+                }
+                is DownloadTarget.LegacyFile -> {
+                    storedPath = resolvedTarget.file.absolutePath
+                    sizeBytes = resolvedTarget.file.length()
+                }
             }
-        }
 
-        // An empty result usually means the link needed something we didn't send (session
-        // cookies, a specific referer) and the server answered with nothing rather than an
-        // error — treat that as a real failure instead of "saving" an unplayable 0-byte file.
-        if (sizeBytes <= 0L) {
-            throw IOException("Downloaded file was empty — the link may need you to be signed in, or may have expired")
-        }
-        // Some CDNs close a long-lived connection early under load instead of erroring out,
-        // which used to silently save a truncated file (e.g. 2MB of a much larger video).
-        if (expectedBytes != null && sizeBytes < expectedBytes) {
-            throw IOException("Connection was cut short (got ${formatMegabytes(sizeBytes)} of ${formatMegabytes(expectedBytes)} MB)")
-        }
+            // An empty result usually means the link needed something we didn't send (session
+            // cookies, a specific referer) and the server answered with nothing rather than an
+            // error — treat that as a real failure instead of "saving" an unplayable 0-byte file.
+            if (sizeBytes <= 0L) {
+                throw IOException("Downloaded file was empty — the link may need you to be signed in, or may have expired")
+            }
+            // Some CDNs close a long-lived connection early under load instead of erroring out,
+            // which used to silently save a truncated file (e.g. 2MB of a much larger video).
+            if (expectedBytes != null && sizeBytes < expectedBytes) {
+                throw IOException("Connection was cut short (got ${formatMegabytes(sizeBytes)} of ${formatMegabytes(expectedBytes)} MB)")
+            }
 
-        val savedMedia = SavedMedia(
-            caption = request.caption,
-            sourceUrl = request.sourceUrl,
-            type = request.type,
-            filePath = storedPath,
-            fileName = fileName,
-            thumbnailUrl = request.thumbnailUrl,
-            sizeBytes = sizeBytes,
-            durationSeconds = request.durationSeconds,
-            createdAt = System.currentTimeMillis()
-        ).let { it.copy(id = app.database.savedMediaDao().insert(it)) }
-        _progress.value = DownloadProgress(request.caption, sizeBytes, sizeBytes, done = true, savedMedia = savedMedia)
+            val savedMedia = SavedMedia(
+                caption = request.caption,
+                sourceUrl = request.sourceUrl,
+                type = request.type,
+                filePath = storedPath,
+                fileName = fileName,
+                thumbnailUrl = request.thumbnailUrl,
+                sizeBytes = sizeBytes,
+                durationSeconds = request.durationSeconds,
+                createdAt = System.currentTimeMillis()
+            ).let { it.copy(id = app.database.savedMediaDao().insert(it)) }
+            _progress.value = DownloadProgress(request.caption, sizeBytes, sizeBytes, done = true, savedMedia = savedMedia)
+        } catch (e: Exception) {
+            // Catches cancellation too (Cancel button) so the partial file/MediaStore
+            // entry is always cleaned up and the queue always moves on to the next item.
+            when (val t = target) {
+                is DownloadTarget.LegacyFile -> t.file.delete()
+                is DownloadTarget.MediaStoreUri -> PublicMediaStore.abandon(this, t.uri)
+                null -> Unit
+            }
+            throw e
+        }
     }
 
     private fun formatMegabytes(bytes: Long): String = "%.1f".format(bytes / (1024.0 * 1024))
@@ -283,17 +227,14 @@ class DownloadService : Service() {
      * request per segment at a time was far too slow — mostly spent waiting on per-request
      * latency rather than actual transfer), writing each to the target strictly in order once
      * fetched regardless of which finishes first within a batch. Progress counts segments, not
-     * bytes, since the total byte size of an HLS stream isn't known ahead of time. Since writes
-     * within a batch happen strictly in order, [DownloadState.completedSegments] is always an
-     * accurate count of what's actually on disk, so a retry can pick up from there via `drop`.
+     * bytes, since the total byte size of an HLS stream isn't known ahead of time.
      */
     private suspend fun downloadHlsToTarget(
         target: DownloadTarget,
         playlistUrl: String,
         caption: String,
         cookie: String?,
-        referer: String?,
-        state: DownloadState
+        referer: String?
     ) = coroutineScope {
         val playlist = HlsResolver.resolve(playlistUrl, cookie, referer)
         if (playlist.isEncrypted) {
@@ -303,14 +244,11 @@ class DownloadService : Service() {
             throw IOException("Couldn't find any video segments in that stream")
         }
 
+        var offset = 0L
+        var completed = 0
         val total = playlist.segmentUrls.size
-        var offset = state.bytesDone
-        var completed = state.completedSegments
-        if (completed > 0) {
-            _progress.value = DownloadProgress(caption, completed.toLong(), total.toLong())
-        }
 
-        playlist.segmentUrls.withIndex().drop(completed).chunked(HLS_PARALLEL_SEGMENTS).forEach { batch ->
+        playlist.segmentUrls.withIndex().chunked(HLS_PARALLEL_SEGMENTS).forEach { batch ->
             val fetches = batch.map { (index, segmentUrl) ->
                 async(Dispatchers.IO) { index to fetchSegment(segmentUrl, index, total, cookie, referer) }
             }
@@ -321,8 +259,6 @@ class DownloadService : Service() {
                 writeAt(target, offset) { out -> out.write(bytes) }
                 offset += bytes.size
                 completed++
-                state.bytesDone = offset
-                state.completedSegments = completed
                 _progress.value = DownloadProgress(caption, completed.toLong(), total.toLong())
                 updateNotification(caption, completed.toLong(), total.toLong())
             }
@@ -343,13 +279,7 @@ class DownloadService : Service() {
      * ignore the Range header and just return the whole file from byte 0 on a 200 — issuing more
      * Range requests to a server like that would silently re-fetch byte 0 into every "chunk" and
      * corrupt the output, so that case (and the case where no size is reported at all) falls back
-     * to streaming everything sequentially over the one open connection instead (which can't be
-     * resumed — a retry of that path always restarts from byte 0).
-     *
-     * A retry that already got past the probe resumes by re-requesting only the ranges in
-     * [DownloadState.completedRanges] that are still missing, rather than everything after some
-     * byte cursor — ranges are fetched concurrently and can land out of order, so a cursor could
-     * wrongly skip a range that's still missing or re-fetch one that already made it to disk.
+     * to streaming everything sequentially over the one open connection instead.
      */
     @OptIn(ExperimentalCoroutinesApi::class)
     private suspend fun downloadToTarget(
@@ -357,44 +287,19 @@ class DownloadService : Service() {
         url: String,
         caption: String,
         cookie: String?,
-        referer: String?,
-        state: DownloadState
+        referer: String?
     ): Long? {
-        val bytesDone = AtomicLong(state.bytesDone)
+        val bytesDone = AtomicLong(0)
         val lastNotify = AtomicLong(0)
 
         fun notifyProgress(totalBytes: Long) {
             val done = bytesDone.get()
-            state.bytesDone = done
             _progress.value = DownloadProgress(caption, done, totalBytes)
             val now = System.currentTimeMillis()
             val prevNotify = lastNotify.get()
             if (now - prevNotify > 400 && lastNotify.compareAndSet(prevNotify, now)) {
                 updateNotification(caption, done, totalBytes)
             }
-        }
-
-        suspend fun fetchRanges(ranges: List<LongRange>, totalBytes: Long) {
-            ranges.asFlow()
-                .flatMapMerge(concurrency = PARALLEL_CONNECTIONS) { range ->
-                    flow {
-                        downloadRangeInto(target, url, range, cookie, referer) { justRead ->
-                            bytesDone.addAndGet(justRead.toLong())
-                            notifyProgress(totalBytes)
-                        }
-                        state.completedRanges += range.first
-                        emit(Unit)
-                    }
-                }
-                .collect()
-        }
-
-        val resumeTotal = state.totalBytes
-        if (resumeTotal != null && state.probeDone) {
-            val remaining = buildRanges(state.probedSize, resumeTotal, CHUNK_SIZE_BYTES)
-                .filter { it.first !in state.completedRanges }
-            fetchRanges(remaining, resumeTotal)
-            return resumeTotal
         }
 
         val probeRequest = Request.Builder()
@@ -412,12 +317,19 @@ class DownloadService : Service() {
                 val probed = body.bytes()
                 writeAt(target, 0) { out -> out.write(probed) }
                 bytesDone.set(probed.size.toLong())
-                state.totalBytes = totalBytes
-                state.probeDone = true
-                state.probedSize = probed.size.toLong()
                 notifyProgress(totalBytes)
 
-                fetchRanges(buildRanges(probed.size.toLong(), totalBytes, CHUNK_SIZE_BYTES), totalBytes)
+                buildRanges(probed.size.toLong(), totalBytes, CHUNK_SIZE_BYTES).asFlow()
+                    .flatMapMerge(concurrency = PARALLEL_CONNECTIONS) { range ->
+                        flow {
+                            downloadRangeInto(target, url, range, cookie, referer) { justRead ->
+                                bytesDone.addAndGet(justRead.toLong())
+                                notifyProgress(totalBytes)
+                            }
+                            emit(Unit)
+                        }
+                    }
+                    .collect()
                 return totalBytes
             } else {
                 val totalBytes = body.contentLength().takeIf { it > 0 }
