@@ -46,6 +46,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.mobicareapp.data.SavedMedia
 import com.mobicareapp.ui.home.HomeScreen
@@ -144,11 +145,15 @@ private fun AppRoot() {
 
     val navController = rememberNavController()
     var videoRequest by remember { mutableStateOf<VideoQueueRequest?>(null) }
-    var bannerVisible by remember { mutableStateOf(true) }
+    var playerFullscreen by remember { mutableStateOf(false) }
     val isInPip by PipState.isInPip.collectAsState()
+    // Derived from the back stack (rather than toggled only from onBack callbacks) so it also
+    // reacts correctly to the system/gesture back button, not just this screen's own back arrow.
+    val currentRoute = navController.currentBackStackEntryAsState().value?.destination?.route
+    val bannerVisible = !playerFullscreen && !isInPip && currentRoute != "browser"
 
     Column(modifier = Modifier.fillMaxSize()) {
-        if (bannerVisible && !isInPip) {
+        if (bannerVisible) {
             ContactBanner()
         }
         Box(modifier = Modifier.weight(1f)) {
@@ -173,7 +178,7 @@ private fun AppRoot() {
                             startIndex = request.startIndex,
                             initialLoop = request.loop,
                             onBack = { navController.popBackStack() },
-                            onFullscreenChange = { fullscreen -> bannerVisible = !fullscreen }
+                            onFullscreenChange = { fullscreen -> playerFullscreen = fullscreen }
                         )
                     }
                 }
