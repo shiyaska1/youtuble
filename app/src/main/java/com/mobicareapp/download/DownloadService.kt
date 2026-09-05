@@ -21,7 +21,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -72,6 +74,9 @@ class DownloadService : Service() {
         .addInterceptor { chain ->
             chain.proceed(chain.request().newBuilder().header("User-Agent", BROWSER_USER_AGENT).build())
         }
+        // OkHttp defaults to 5 concurrent requests per host, which would otherwise silently cap
+        // both the ranged-chunk and HLS-segment parallelism below.
+        .dispatcher(okhttp3.Dispatcher().apply { maxRequestsPerHost = 8 })
         .build()
 
     override fun onCreate() {
@@ -219,10 +224,11 @@ class DownloadService : Service() {
     private fun formatMegabytes(bytes: Long): String = "%.1f".format(bytes / (1024.0 * 1024))
 
     /**
-     * Resolves the playlist to its ordered segment URLs and fetches them one after another,
-     * appending each to the target in order — the standard way to turn an HLS stream (many small
-     * .ts segments) into one playable file without needing ffmpeg. Progress here counts segments,
-     * not bytes, since the total byte size of an HLS stream isn't known ahead of time.
+     * Resolves the playlist to its ordered segment URLs and fetches them several at a time (one
+     * request per segment at a time was far too slow — mostly spent waiting on per-request
+     * latency rather than actual transfer), writing each to the target strictly in order once
+     * fetched regardless of which finishes first within a batch. Progress counts segments, not
+     * bytes, since the total byte size of an HLS stream isn't known ahead of time.
      */
     private suspend fun downloadHlsToTarget(
         target: DownloadTarget,
@@ -230,7 +236,7 @@ class DownloadService : Service() {
         caption: String,
         cookie: String?,
         referer: String?
-    ) {
+    ) = coroutineScope {
         val playlist = HlsResolver.resolve(playlistUrl, cookie, referer)
         if (playlist.isEncrypted) {
             throw IOException("This video stream is encrypted and can't be downloaded")
@@ -240,17 +246,31 @@ class DownloadService : Service() {
         }
 
         var offset = 0L
+        var completed = 0
         val total = playlist.segmentUrls.size
-        playlist.segmentUrls.forEachIndexed { index, segmentUrl ->
-            val segmentRequest = Request.Builder().url(segmentUrl).withSessionHeaders(cookie, referer).build()
-            client.newCall(segmentRequest).execute().use { response ->
-                if (!response.isSuccessful) throw IOException("Segment ${index + 1} of $total failed (server returned ${response.code})")
-                val bytes = response.body?.bytes() ?: throw IOException("Segment ${index + 1} of $total was empty")
+
+        playlist.segmentUrls.withIndex().chunked(HLS_PARALLEL_SEGMENTS).forEach { batch ->
+            val fetches = batch.map { (index, segmentUrl) ->
+                async(Dispatchers.IO) { index to fetchSegment(segmentUrl, index, total, cookie, referer) }
+            }
+            // .await() in original list order, not completion order, so segments land on disk in
+            // the right sequence even though several were fetched concurrently.
+            fetches.forEach { deferred ->
+                val (_, bytes) = deferred.await()
                 writeAt(target, offset) { out -> out.write(bytes) }
                 offset += bytes.size
+                completed++
+                _progress.value = DownloadProgress(caption, completed.toLong(), total.toLong())
+                updateNotification(caption, completed.toLong(), total.toLong())
             }
-            _progress.value = DownloadProgress(caption, (index + 1).toLong(), total.toLong())
-            updateNotification(caption, (index + 1).toLong(), total.toLong())
+        }
+    }
+
+    private fun fetchSegment(segmentUrl: String, index: Int, total: Int, cookie: String?, referer: String?): ByteArray {
+        val segmentRequest = Request.Builder().url(segmentUrl).withSessionHeaders(cookie, referer).build()
+        client.newCall(segmentRequest).execute().use { response ->
+            if (!response.isSuccessful) throw IOException("Segment ${index + 1} of $total failed (server returned ${response.code})")
+            return response.body?.bytes() ?: throw IOException("Segment ${index + 1} of $total was empty")
         }
     }
 
@@ -471,6 +491,11 @@ class DownloadService : Service() {
         // A connection getting cut early is usually transient (CDN load-shedding), so it's
         // worth a couple of clean retries before surfacing an error to the user.
         private const val MAX_ATTEMPTS = 3
+
+        // Fetching one HLS segment at a time spent most of its time waiting on per-request
+        // latency rather than actual transfer, since segments are small; a handful in flight at
+        // once hides that latency without overwhelming the server.
+        private const val HLS_PARALLEL_SEGMENTS = 6
 
         private val _progress = MutableStateFlow<DownloadProgress?>(null)
         val progress = _progress.asStateFlow()
