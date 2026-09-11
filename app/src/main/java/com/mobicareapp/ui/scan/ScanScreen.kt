@@ -7,6 +7,9 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.ActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,6 +26,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -54,12 +59,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
+import com.mobicareapp.applock.AppLockManager
 import com.mobicareapp.data.ScannedDocument
 import com.mobicareapp.scan.ScanFileStore
 import kotlinx.coroutines.launch
@@ -99,7 +108,8 @@ fun ScanScreen() {
         ScanPagesScreen(
             document = document,
             onBack = { viewingDocument = null },
-            onSharePage = { pagePath -> sharePage(context, pagePath) }
+            onSharePage = { pagePath -> sharePage(context, pagePath) },
+            onShareAll = { sharePages(context, document.pagePaths) }
         )
         return
     }
@@ -113,6 +123,10 @@ fun ScanScreen() {
                         onClick = {
                             scope.launch {
                                 val intentSender: IntentSender = viewModel.startScanIntentSender(activity)
+                                // The scanner's own Activity briefly takes over the foreground —
+                                // without this, the app-lock treats that hand-off as backgrounding
+                                // and re-locks mid-scan, which drops the result on unlock.
+                                AppLockManager.suppressNextLock()
                                 scanLauncher.launch(IntentSenderRequest.Builder(intentSender).build())
                             }
                         },
@@ -222,8 +236,11 @@ private fun ScanReviewScreen(
 private fun ScanPagesScreen(
     document: ScannedDocument,
     onBack: () -> Unit,
-    onSharePage: (String) -> Unit
+    onSharePage: (String) -> Unit,
+    onShareAll: () -> Unit
 ) {
+    var fullScreenIndex by remember { mutableStateOf<Int?>(null) }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -231,6 +248,13 @@ private fun ScanPagesScreen(
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.Default.ArrowBack, contentDescription = "Back")
+                    }
+                },
+                actions = {
+                    TextButton(onClick = onShareAll) {
+                        Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Share all")
                     }
                 }
             )
@@ -250,6 +274,7 @@ private fun ScanPagesScreen(
                         modifier = Modifier
                             .size(64.dp, 84.dp)
                             .clip(RoundedCornerShape(6.dp))
+                            .clickable { fullScreenIndex = index }
                     ) {
                         AsyncImage(
                             model = File(pagePath),
@@ -269,6 +294,43 @@ private fun ScanPagesScreen(
                     }
                 }
             }
+        }
+    }
+
+    fullScreenIndex?.let { startIndex ->
+        FullScreenPageViewer(
+            pagePaths = document.pagePaths,
+            startIndex = startIndex,
+            onDismiss = { fullScreenIndex = null }
+        )
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun FullScreenPageViewer(pagePaths: List<String>, startIndex: Int, onDismiss: () -> Unit) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+            val pagerState = rememberPagerState(initialPage = startIndex) { pagePaths.size }
+            HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
+                AsyncImage(
+                    model = File(pagePaths[page]),
+                    contentDescription = "Page ${page + 1}",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+            IconButton(onClick = onDismiss, modifier = Modifier.padding(4.dp)) {
+                Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
+            }
+            Text(
+                "${pagerState.currentPage + 1} / ${pagePaths.size}",
+                color = Color.White,
+                modifier = Modifier.align(Alignment.TopEnd).padding(16.dp)
+            )
         }
     }
 }
@@ -381,4 +443,15 @@ private fun sharePage(context: android.content.Context, pagePath: String) {
         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     }
     context.startActivity(Intent.createChooser(intent, "Share page"))
+}
+
+private fun sharePages(context: android.content.Context, pagePaths: List<String>) {
+    val uris = ArrayList(pagePaths.map { ScanFileStore.shareUri(context, File(it)) })
+    val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+        type = "image/jpeg"
+        putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    context.startActivity(Intent.createChooser(intent, "Share pages"))
 }

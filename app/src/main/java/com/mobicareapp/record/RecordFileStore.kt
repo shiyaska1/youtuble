@@ -2,6 +2,7 @@ package com.mobicareapp.record
 
 import android.content.Context
 import android.media.MediaRecorder
+import android.media.audiofx.NoiseSuppressor
 import android.net.Uri
 import android.os.Environment
 import android.os.ParcelFileDescriptor
@@ -60,6 +61,12 @@ object RecordFileStore {
             }
         }
 
+    /** Turns on the device's built-in noise-suppression effect for a recording session, when available — not every device ships (or enables) one, so callers should treat a null result as "no suppression, that's fine". */
+    fun attachNoiseSuppressor(audioSessionId: Int): NoiseSuppressor? {
+        if (!NoiseSuppressor.isAvailable()) return null
+        return runCatching { NoiseSuppressor.create(audioSessionId)?.apply { enabled = true } }.getOrNull()
+    }
+
     fun abandon(context: Context, target: RecordTarget) {
         when (target) {
             is RecordTarget.MediaStoreUri -> PublicMediaStore.abandon(context, target.uri)
@@ -74,8 +81,14 @@ object RecordFileStore {
         }
     }
 
-    /** Finalizes the written file and, if anything was actually captured, files it into the Library under an "Audio"/"Video" category. */
-    suspend fun finalizeAndSave(context: Context, target: RecordTarget, type: MediaType, caption: String) {
+    /** Finalizes the written file and, if anything was actually captured, files it into the Library under [categoryName] (defaulting to a plain "Audio"/"Video" category). */
+    suspend fun finalizeAndSave(
+        context: Context,
+        target: RecordTarget,
+        type: MediaType,
+        caption: String,
+        categoryName: String = if (type == MediaType.VIDEO) "Video" else "Audio"
+    ) {
         val storedPath: String
         val sizeBytes: Long
         when (target) {
@@ -95,7 +108,6 @@ object RecordFileStore {
         }
 
         val app = context.applicationContext as YtSaverApp
-        val categoryName = if (type == MediaType.VIDEO) "Video" else "Audio"
         val categoryDao = app.database.mediaCategoryDao()
         val categoryId = categoryDao.findByName(categoryName)?.id
             ?: categoryDao.insert(MediaCategory(name = categoryName))

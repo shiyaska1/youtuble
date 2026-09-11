@@ -31,6 +31,9 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -38,9 +41,10 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import com.mobicareapp.data.MediaType
+import com.mobicareapp.ui.browser.SignInWebViewDialog
 
 @Composable
-fun HomeScreen(viewModel: HomeViewModel = viewModel(), onOpenBrowser: () -> Unit = {}) {
+fun HomeScreen(viewModel: HomeViewModel = viewModel(), onOpenBrowser: (String?) -> Unit = {}) {
     val state by viewModel.uiState.collectAsState()
     val progress by viewModel.downloadProgress.collectAsState()
     val queuedDownloads by viewModel.queuedDownloads.collectAsState()
@@ -70,7 +74,7 @@ fun HomeScreen(viewModel: HomeViewModel = viewModel(), onOpenBrowser: () -> Unit
                 }
             }
 
-            TextButton(onClick = onOpenBrowser) {
+            TextButton(onClick = { onOpenBrowser(null) }) {
                 Icon(Icons.Default.Public, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(modifier = Modifier.width(6.dp))
                 Text("Can't paste a direct link? Browse the site and find it here")
@@ -119,7 +123,9 @@ fun HomeScreen(viewModel: HomeViewModel = viewModel(), onOpenBrowser: () -> Unit
                     queued = queued,
                     onCaptionChanged = { viewModel.onCaptionChanged(queued.id, it) },
                     onRemove = { viewModel.removeFromQueue(queued.id) },
-                    onSave = { type -> viewModel.saveAs(queued.id, type) }
+                    onSave = { type -> viewModel.saveAs(queued.id, type) },
+                    onRetry = { viewModel.retry(queued.id) },
+                    onOpenInBrowse = { onOpenBrowser(normalizeUrlForSignIn(queued.urlText)) }
                 )
             }
         }
@@ -131,7 +137,9 @@ private fun QueueItemCard(
     queued: QueuedLink,
     onCaptionChanged: (String) -> Unit,
     onRemove: () -> Unit,
-    onSave: (MediaType) -> Unit
+    onSave: (MediaType) -> Unit,
+    onRetry: () -> Unit,
+    onOpenInBrowse: () -> Unit
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
@@ -150,9 +158,28 @@ private fun QueueItemCard(
                     }
                 }
                 is QueueStatus.Error -> {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    var showSignIn by remember { mutableStateOf(false) }
+                    Row(verticalAlignment = Alignment.Top) {
                         Text(status.message, color = MaterialTheme.colorScheme.error, modifier = Modifier.weight(1f))
                         IconButton(onClick = onRemove) { Icon(Icons.Default.Close, contentDescription = "Remove") }
+                    }
+                    Row {
+                        // Some sites only serve their video to a signed-in session — this opens a
+                        // real WebView so the user can log in with their own credentials, then
+                        // retries with whatever session cookie that produced.
+                        TextButton(onClick = { showSignIn = true }) { Text("Sign in") }
+                        // For sites blocked by a bot/JS check that no plain HTTP request (signed
+                        // in or not) can get past — Browse uses a real WebView instead, which can.
+                        TextButton(onClick = onOpenInBrowse) { Text("Open in Browse") }
+                    }
+                    if (showSignIn) {
+                        SignInWebViewDialog(
+                            url = normalizeUrlForSignIn(queued.urlText),
+                            onDismiss = {
+                                showSignIn = false
+                                onRetry()
+                            }
+                        )
                     }
                 }
                 is QueueStatus.Ready -> {
@@ -199,4 +226,9 @@ private fun QueueItemCard(
             }
         }
     }
+}
+
+private fun normalizeUrlForSignIn(input: String): String {
+    val trimmed = input.trim()
+    return if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) trimmed else "https://$trimmed"
 }

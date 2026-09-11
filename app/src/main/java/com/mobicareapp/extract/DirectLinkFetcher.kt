@@ -1,5 +1,6 @@
 package com.mobicareapp.extract
 
+import android.webkit.CookieManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.Headers
@@ -16,7 +17,13 @@ import java.util.concurrent.TimeUnit
 object DirectLinkFetcher {
 
     private val client = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
+        // A server that never responds at all (common behind a login wall or bot-check) used to
+        // hang for OkHttp's 10s read-timeout default on top of a 15s connect timeout, on *both*
+        // the HEAD and the ranged-GET probe below — over 30s before the user saw any error at
+        // all, and the same wait again on every retry. Capping the whole call (connect+write+read
+        // together) is what actually bounds that.
+        .callTimeout(10, TimeUnit.SECONDS)
+        .connectTimeout(10, TimeUnit.SECONDS)
         .addInterceptor { chain ->
             chain.proceed(chain.request().newBuilder().header("User-Agent", BROWSER_USER_AGENT).build())
         }
@@ -30,15 +37,25 @@ object DirectLinkFetcher {
     suspend fun fetch(rawUrl: String): Result<FetchedStream> = withContext(Dispatchers.IO) {
         runCatching {
             val url = rawUrl.trim()
-            val headers = probeHeaders(url)
+            // Reuses a session cookie already sitting in the shared, app-wide WebView cookie
+            // store (from Browse or the sign-in dialog) — some links only respond once signed in.
+            val cookie = runCatching { CookieManager.getInstance().getCookie(url) }.getOrNull()
+            val headers = probeHeaders(url, cookie)
             val contentType = headers["Content-Type"]?.substringBefore(';')?.trim()?.lowercase() ?: "application/octet-stream"
+            // A normal webpage (the common case when the pasted link isn't a raw file) comes back
+            // as text/html here, not a media type — that's the signal to let the caller fall back
+            // to GenericVideoFetcher's page-scraping instead of saving the HTML as a fake video.
+            if (!looksLikeMediaContentType(contentType)) {
+                throw java.io.IOException("That link doesn't point straight at a video/audio file (got \"$contentType\")")
+            }
             val isAudio = contentType.startsWith("audio/")
 
             val option = MediaOption(
                 streamUrl = url,
                 fileExtension = extensionFromUrlOrType(url, contentType),
                 mimeType = contentType,
-                label = if (isAudio) "Audio" else "Video"
+                label = if (isAudio) "Audio" else "Video",
+                cookie = cookie
             )
 
             FetchedStream(
@@ -52,14 +69,24 @@ object DirectLinkFetcher {
         }
     }
 
-    private fun probeHeaders(url: String): Headers {
-        val headRequest = Request.Builder().url(url).head().build()
+    private fun looksLikeMediaContentType(contentType: String): Boolean =
+        contentType.startsWith("video/") || contentType.startsWith("audio/") ||
+            contentType == "application/octet-stream" ||
+            contentType == "application/vnd.apple.mpegurl" || contentType == "application/x-mpegurl" ||
+            contentType == "application/dash+xml"
+
+    private fun probeHeaders(url: String, cookie: String?): Headers {
+        val headRequest = Request.Builder().url(url).head().apply {
+            if (!cookie.isNullOrBlank()) header("Cookie", cookie)
+        }.build()
         runCatching {
             client.newCall(headRequest).execute().use { response ->
                 if (response.isSuccessful) return response.headers
             }
         }
-        val rangedGet = Request.Builder().url(url).header("Range", "bytes=0-0").build()
+        val rangedGet = Request.Builder().url(url).header("Range", "bytes=0-0").apply {
+            if (!cookie.isNullOrBlank()) header("Cookie", cookie)
+        }.build()
         client.newCall(rangedGet).execute().use { response ->
             if (!response.isSuccessful && response.code != 206) {
                 throw java.io.IOException("Couldn't reach that link (server returned ${response.code})")

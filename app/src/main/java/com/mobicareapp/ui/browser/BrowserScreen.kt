@@ -1,19 +1,17 @@
 package com.mobicareapp.ui.browser
 
 import android.annotation.SuppressLint
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
-import android.content.Intent
-import android.net.Uri
 import android.os.Handler
 import android.os.Looper
-import android.os.Message
 import android.webkit.CookieManager
-import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
-import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -29,6 +27,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DesktopWindows
 import androidx.compose.material.icons.filled.Download
@@ -67,8 +66,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import androidx.webkit.WebSettingsCompat
-import androidx.webkit.WebViewFeature
 import com.mobicareapp.YtSaverApp
 import com.mobicareapp.data.MediaAccess
 import com.mobicareapp.data.MediaType
@@ -101,12 +98,6 @@ private data class DetectedMedia(
 private val VIDEO_EXTENSIONS = setOf("mp4", "webm", "mkv", "mov", "3gp")
 private val AUDIO_EXTENSIONS = setOf("mp3", "m4a", "aac", "wav", "ogg")
 
-// A real Android Chrome UA (not a desktop one) — Google's sign-in flow serves a different,
-// stricter page to what it thinks is a desktop browser embedded somewhere it shouldn't be.
-private const val MOBILE_CHROME_USER_AGENT =
-    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) " +
-        "Chrome/124.0.0.0 Mobile Safari/537.36"
-
 private val probeClient = OkHttpClient.Builder()
     .connectTimeout(8, TimeUnit.SECONDS)
     .readTimeout(8, TimeUnit.SECONDS)
@@ -124,11 +115,22 @@ private val probeClient = OkHttpClient.Builder()
  */
 private object BrowserSession {
     var addressText by mutableStateOf("")
+    var pendingUrl by mutableStateOf<String?>(null)
     var desktopMode by mutableStateOf(false)
     val detected = mutableStateListOf<DetectedMedia>()
     val sizes = mutableStateMapOf<String, Long?>()
     val hlsSegmentCounts = mutableStateMapOf<String, Int?>()
     val currentPageUrl = java.util.concurrent.atomic.AtomicReference<String?>(null)
+}
+
+/**
+ * Lets another screen (Home, when a pasted link fails outright — often a sign-in wall or bot
+ * check no plain HTTP fetch can get past) hand a URL straight to Browse's real WebView instead of
+ * the user having to retype it after navigating over.
+ */
+fun openInBrowse(url: String) {
+    BrowserSession.addressText = url
+    BrowserSession.pendingUrl = url
 }
 
 /**
@@ -153,7 +155,7 @@ fun BrowserScreen(
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     var addressText by BrowserSession::addressText
-    var pendingUrl by remember { mutableStateOf<String?>(null) }
+    var pendingUrl by BrowserSession::pendingUrl
     val detected = BrowserSession.detected
     val sizes = BrowserSession.sizes
     val hlsSegmentCounts = BrowserSession.hlsSegmentCounts
@@ -188,6 +190,16 @@ fun BrowserScreen(
                     }
                 },
                 actions = {
+                    IconButton(onClick = {
+                        val link = currentPageUrl.get()?.takeIf { it.isNotBlank() } ?: addressText
+                        if (link.isNotBlank()) {
+                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            clipboard.setPrimaryClip(ClipData.newPlainText("Page link", link))
+                            Toast.makeText(context, "Link copied", Toast.LENGTH_SHORT).show()
+                        }
+                    }) {
+                        Icon(Icons.Default.ContentCopy, contentDescription = "Copy page link")
+                    }
                     IconButton(onClick = { desktopMode = !desktopMode }) {
                         Icon(
                             if (desktopMode) Icons.Default.PhoneAndroid else Icons.Default.DesktopWindows,
@@ -353,8 +365,14 @@ fun BrowserScreen(
                         webView.settings.loadWithOverviewMode = desktopMode
                         webView.reload()
                     }
+                    // Consumed immediately rather than compared against webView.url — a redirect
+                    // or an added trailing slash means the live URL never matches the string the
+                    // user typed, which was re-triggering loadUrl() on every recomposition
+                    // (several a second while detected-media state is updating) and looked like
+                    // the page kept refreshing itself.
                     pendingUrl?.let { url ->
-                        if (webView.url != url) webView.loadUrl(url)
+                        webView.loadUrl(url)
+                        pendingUrl = null
                     }
                 }
             )
@@ -471,30 +489,6 @@ private fun startAutoSkipAdsLoop(webView: WebView, handler: Handler) {
     handler.postDelayed(runnable, AUTO_SKIP_AD_INTERVAL_MS)
 }
 
-private fun configureAsRealBrowser(webView: WebView) {
-    val settings: WebSettings = webView.settings
-    settings.javaScriptEnabled = true
-    settings.domStorageEnabled = true
-    settings.databaseEnabled = true
-    settings.userAgentString = MOBILE_CHROME_USER_AGENT
-    settings.javaScriptCanOpenWindowsAutomatically = true
-    settings.setSupportMultipleWindows(true)
-    settings.loadWithOverviewMode = true
-    settings.useWideViewPort = true
-
-    val cookieManager = CookieManager.getInstance()
-    cookieManager.setAcceptCookie(true)
-    cookieManager.setAcceptThirdPartyCookies(webView, true)
-
-    // The stock WebView tags every request with "X-Requested-With: <our package name>" by
-    // default, which is exactly what Google's servers check for to block sign-in inside an
-    // embedded WebView ("This browser or app may not be secure"). An empty allow-list means
-    // no origin gets that header, so the request looks like it came from a normal browser.
-    if (WebViewFeature.isFeatureSupported(WebViewFeature.REQUESTED_WITH_HEADER_ALLOW_LIST)) {
-        WebSettingsCompat.setRequestedWithHeaderOriginAllowList(settings, emptySet())
-    }
-}
-
 private fun mediaSniffingWebViewClient(
     mainHandler: Handler,
     detected: androidx.compose.runtime.snapshots.SnapshotStateList<DetectedMedia>,
@@ -503,8 +497,7 @@ private fun mediaSniffingWebViewClient(
     // shouldInterceptRequest fires on a background thread, but WebView.getUrl() (view.url) is
     // only safe to call on the thread that owns the WebView — calling it here crashed the app on
     // literally every request. onPageStarted *does* run on the main thread, so track the current
-    // page URL there instead of reading it off the WebView from the wrong thread. Shared with
-    // ScrapedMediaBridge so it can tag its own finds with the right referer too.
+    // page URL there instead of reading it off the WebView from the wrong thread.
     override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {
         currentPageUrl.set(url)
     }
@@ -513,59 +506,22 @@ private fun mediaSniffingWebViewClient(
         launchExternalUrlIfNeeded(view.context, request.url.toString())
 
     override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
-        classifyMediaUrl(request.url.toString(), currentPageUrl.get())?.let { media ->
+        // A page that embeds its player in an iframe (Dailymotion and similar sites) fetches its
+        // video from a CDN that checks the Referer against the iframe's own URL, not the outer
+        // page's — currentPageUrl only ever tracks the top-level page's onPageStarted. The
+        // request's own Referer header (set by the browser engine per w3c referrer-policy rules)
+        // already reflects whichever document actually issued it, iframe or not, so prefer that
+        // over our own tracking whenever it's present.
+        val referer = request.requestHeaders.entries
+            .firstOrNull { it.key.equals("Referer", ignoreCase = true) }
+            ?.value
+            ?: currentPageUrl.get()
+        classifyMediaUrl(request.url.toString(), referer)?.let { media ->
             mainHandler.post {
                 if (detected.none { mediaContentKey(it.url) == mediaContentKey(media.url) }) detected.add(media)
             }
         }
         return super.shouldInterceptRequest(view, request)
-    }
-}
-
-/**
- * Some login/verification flows (Facebook's device-approval screen, payment redirects, etc.)
- * hand off to an `intent://` URL or another non-http(s) scheme meant to launch a native app or
- * system component instead of opening a new page/popup — a WebView can't render those itself,
- * and without this it just silently does nothing when tapped, looking like the popup or
- * redirect failed. Returns true (link handled) only when something was actually launched, so a
- * plain http(s) navigation still falls through to the WebView as normal.
- */
-private fun launchExternalUrlIfNeeded(context: Context, url: String): Boolean {
-    if (url.startsWith("http://") || url.startsWith("https://")) return false
-    return runCatching {
-        val intent = if (url.startsWith("intent://")) {
-            Intent.parseUri(url, Intent.URI_INTENT_SCHEME)
-        } else {
-            Intent(Intent.ACTION_VIEW, Uri.parse(url))
-        }
-        context.startActivity(intent)
-        true
-    }.getOrDefault(false)
-}
-
-private fun popupHostingWebChromeClient(
-    onPopupRequested: (WebView) -> Unit,
-    onPopupClosed: () -> Unit
-): WebChromeClient = object : WebChromeClient() {
-    override fun onCreateWindow(view: WebView, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message): Boolean {
-        val transport = resultMsg.obj as? WebView.WebViewTransport ?: return false
-
-        val popup = WebView(view.context)
-        configureAsRealBrowser(popup)
-        popup.webViewClient = object : WebViewClient() {
-            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean =
-                launchExternalUrlIfNeeded(view.context, request.url.toString())
-        }
-        popup.webChromeClient = object : WebChromeClient() {
-            override fun onCloseWindow(window: WebView) {
-                onPopupClosed()
-            }
-        }
-        onPopupRequested(popup)
-
-        transport.webView = popup
-        resultMsg.sendToTarget()
-        return true
     }
 }
 
@@ -597,10 +553,9 @@ private fun normalizeUrl(input: String): String {
 }
 
 /**
- * The same underlying video is often caught twice under two different-looking URLs — once via
- * network sniffing, once via [EXTRACT_EMBEDDED_VIDEO_SCRIPT] finding another quality field for
- * the same post — that only differ in per-request signed-token query parameters. Comparing on
- * the path instead of the full URL collapses those into one entry in the detected-media list.
+ * The same underlying video is sometimes caught twice under two different-looking URLs that only
+ * differ in per-request signed-token query parameters. Comparing on the path instead of the full
+ * URL collapses those into one entry in the detected-media list.
  */
 private fun mediaContentKey(url: String): String = url.substringBefore('?')
 

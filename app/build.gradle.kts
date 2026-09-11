@@ -15,6 +15,12 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
+        // FFmpeg's native libraries are the bulk of the app's size. arm64-v8a alone covers
+        // effectively every phone sold in the last ~8 years; dropping armeabi-v7a and the
+        // emulator-only x86/x86_64 ABIs keeps this test build small enough to deliver.
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
     }
 
     buildTypes {
@@ -52,7 +58,12 @@ dependencies {
     implementation("androidx.navigation:navigation-compose:2.7.7")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.1")
+    // ProcessLifecycleOwner, so app-lock can tell "backgrounded" apart from "just rotated"
+    implementation("androidx.lifecycle:lifecycle-process:2.8.1")
     debugImplementation("androidx.compose.ui:ui-tooling")
+
+    // App lock: fingerprint/face unlock with the device's own PIN/pattern/password as fallback
+    implementation("androidx.biometric:biometric:1.1.0")
 
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
@@ -93,4 +104,11 @@ dependencies {
     // Camera scan-to-PDF: Google Play Services' own scanning UI (edge detection,
     // crop, multi-page capture) instead of a hand-rolled CameraX flow.
     implementation("com.google.android.gms:play-services-mlkit-document-scanner:16.0.0")
+
+    // Video conversion for formats Android's own MediaCodec can't decode at all (the same
+    // situation MX Player handles by bundling its own decoders rather than relying on the OS).
+    // The original FFmpegKit (com.arthenica:ffmpeg-kit-full-gpl) was retired and pulled from
+    // Maven Central in 2025 — this is a community-maintained continuation of the same project
+    // (same com.arthenica.ffmpegkit.* API), republished after the original disappeared.
+    implementation("com.moizhassan.ffmpeg:ffmpeg-kit-16kb:6.1.1")
 }

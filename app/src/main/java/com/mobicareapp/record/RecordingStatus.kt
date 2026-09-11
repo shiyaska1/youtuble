@@ -4,9 +4,12 @@ import com.mobicareapp.data.MediaType
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-data class ActiveRecording(val type: MediaType, val startedAtMillis: Long)
+/** Which capture path produced the recording — MediaType alone can't tell VideoRecordService (camera) and ScreenRecordService (screen) apart, both save as MediaType.VIDEO. */
+enum class RecordingSource { MIC, CAMERA, SCREEN }
 
-/** Shared by AudioRecordService/VideoRecordService so RecordScreen doesn't need to know which one is running. */
+data class ActiveRecording(val type: MediaType, val source: RecordingSource, val startedAtMillis: Long)
+
+/** Shared by AudioRecordService/VideoRecordService/ScreenRecordService so RecordScreen doesn't need to know which one is running. */
 object RecordingStatus {
     private val _active = MutableStateFlow<ActiveRecording?>(null)
     val active = _active.asStateFlow()
@@ -14,8 +17,8 @@ object RecordingStatus {
     private val _error = MutableStateFlow<String?>(null)
     val error = _error.asStateFlow()
 
-    fun started(type: MediaType) {
-        _active.value = ActiveRecording(type, System.currentTimeMillis())
+    fun started(type: MediaType, source: RecordingSource) {
+        _active.value = ActiveRecording(type, source, System.currentTimeMillis())
     }
 
     fun stopped() {

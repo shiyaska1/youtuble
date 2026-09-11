@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">YT Saver</string>
+    <string name="volume_trigger_description">Lets YT Saver start or stop audio recording when you press Volume Up 3 times quickly, even with the screen off. It only watches the volume buttons for this pattern — it does not read your screen or other input.</string>
 </resources>

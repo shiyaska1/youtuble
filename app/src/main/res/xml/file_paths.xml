@@ -1,4 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
     <external-files-path name="scans" path="Scans/" />
+    <!-- Everything the Library holds — downloads, recordings, imports and edits all land in
+         subfolders of the app's own external files dir. Sharing needs a FileProvider URI for any
+         of them, and internal-files is the fallback the storage helpers use when there's no
+         external dir at all. -->
+    <external-files-path name="media" path="." />
+    <files-path name="internal_media" path="." />
 </paths>

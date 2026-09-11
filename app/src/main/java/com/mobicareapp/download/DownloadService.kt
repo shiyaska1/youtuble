@@ -5,6 +5,8 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -195,6 +197,13 @@ class DownloadService : Service() {
             if (expectedBytes != null && sizeBytes < expectedBytes) {
                 throw IOException("Connection was cut short (got ${formatMegabytes(sizeBytes)} of ${formatMegabytes(expectedBytes)} MB)")
             }
+            // Some sites hand back a decoy or broken response (an error page, a truncated
+            // fragment, a solid-black decoy clip) to a request that isn't signed in or doesn't
+            // look like a real browser, even though it reports a plausible file size — this
+            // catches that before it's saved as if the download actually worked.
+            if (request.type == MediaType.VIDEO && looksLikeBrokenVideo(resolvedTarget)) {
+                throw IOException("That download isn't a real, playable video (came back blank or unreadable) — removed. The source likely needs you to be signed in, or blocks this kind of download.")
+            }
 
             val savedMedia = SavedMedia(
                 caption = request.caption,
@@ -221,6 +230,68 @@ class DownloadService : Service() {
     }
 
     private fun formatMegabytes(bytes: Long): String = "%.1f".format(bytes / (1024.0 * 1024))
+
+    /**
+     * Two different ways a "successful" download can still not actually be a playable video:
+     *
+     * 1. The file's container can't be opened at all — MediaMetadataRetriever.setDataSource()
+     *    itself throws. That's not the "valid but unusual codec" case worth staying lenient
+     *    about (a fuller-featured player like ExoPlayer can still play plenty MediaMetadataRetriever
+     *    can't) — it's what an HTML error page, a truncated fragment, or a decoy response saved
+     *    with a video extension looks like: not a video at all, at the container level.
+     * 2. The container opens fine, but every sampled frame is a single flat, near-black color —
+     *    a real dark scene still has some pixel-to-pixel variation (grain, faint shapes), so
+     *    requiring "flat" as well as "dark" is what tells an actual black scene apart from a
+     *    genuinely blank/decoy clip some sites serve to a request that isn't signed in or
+     *    doesn't look like a real browser.
+     *
+     * Only case 1 and 2 reject the file; anything else MediaMetadataRetriever merely struggles
+     * with (can decode the container but not grab a thumbnail frame, say) is left alone.
+     */
+    private fun looksLikeBrokenVideo(target: DownloadTarget): Boolean {
+        val retriever = MediaMetadataRetriever()
+        try {
+            try {
+                when (target) {
+                    is DownloadTarget.LegacyFile -> retriever.setDataSource(target.file.absolutePath)
+                    is DownloadTarget.MediaStoreUri -> retriever.setDataSource(this, target.uri)
+                }
+            } catch (e: Exception) {
+                return true
+            }
+
+            val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
+            if (durationMs == null || durationMs <= 0) return false
+
+            val frames = listOf(0.15, 0.5, 0.85).mapNotNull { fraction ->
+                val timeUs = (durationMs * 1000 * fraction).toLong()
+                runCatching { retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC) }.getOrNull()
+            }
+            return frames.size >= 2 && frames.all { isFlatDarkFrame(it) }
+        } catch (e: Exception) {
+            return false
+        } finally {
+            retriever.release()
+        }
+    }
+
+    private fun isFlatDarkFrame(bitmap: Bitmap): Boolean {
+        val sampleSize = 16
+        val scaled = Bitmap.createScaledBitmap(bitmap, sampleSize, sampleSize, true)
+        val pixels = IntArray(sampleSize * sampleSize)
+        scaled.getPixels(pixels, 0, sampleSize, 0, 0, sampleSize, sampleSize)
+        var minLum = 255
+        var maxLum = 0
+        var sum = 0L
+        for (p in pixels) {
+            val lum = (((p shr 16) and 0xFF) * 299 + ((p shr 8) and 0xFF) * 587 + (p and 0xFF) * 114) / 1000
+            sum += lum
+            if (lum < minLum) minLum = lum
+            if (lum > maxLum) maxLum = lum
+        }
+        val avgLum = sum / pixels.size
+        return avgLum < 12 && (maxLum - minLum) < 10
+    }
 
     /**
      * Resolves the playlist to its ordered segment URLs and fetches them several at a time (one

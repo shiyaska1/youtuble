@@ -6,6 +6,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.media.MediaRecorder
+import android.media.audiofx.NoiseSuppressor
 import android.os.Build
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
@@ -29,6 +30,7 @@ class AudioRecordService : Service() {
     private var outputPfd: ParcelFileDescriptor? = null
     private var target: RecordTarget? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private var noiseSuppressor: NoiseSuppressor? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -46,18 +48,32 @@ class AudioRecordService : Service() {
             target = newTarget
 
             val newRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) MediaRecorder(this) else @Suppress("DEPRECATION") MediaRecorder()
+            // VOICE_COMMUNICATION was tried here for stronger built-in noise suppression, but on
+            // several devices it silently records with no usable audio at all unless the app also
+            // explicitly puts AudioManager into MODE_IN_COMMUNICATION — not worth that fragility
+            // now that Library's manual/live EQ filters give real, working noise control instead.
             newRecorder.setAudioSource(MediaRecorder.AudioSource.MIC)
             newRecorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
             newRecorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-            newRecorder.setAudioEncodingBitRate(128_000)
+            // Mono + a lower bitrate — voice doesn't need stereo or music-grade quality, and this
+            // cuts the saved file to a fraction of the previous size.
+            newRecorder.setAudioChannels(1)
+            newRecorder.setAudioEncodingBitRate(48_000)
             newRecorder.setAudioSamplingRate(44_100)
             outputPfd = RecordFileStore.setOutput(newRecorder, this, newTarget)
             newRecorder.prepare()
             newRecorder.start()
             recorder = newRecorder
+            // Cuts down steady background noise (fans, traffic, hiss) in the captured audio.
+            // MediaRecorder (unlike AudioRecord) doesn't expose a session id up front — it's
+            // only readable via the active recording configuration once actually recording.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val sessionId = newRecorder.activeRecordingConfiguration?.clientAudioSessionId
+                if (sessionId != null) noiseSuppressor = RecordFileStore.attachNoiseSuppressor(sessionId)
+            }
 
             wakeLock = RecordFileStore.acquireWakeLock(this, "ytsaver:audio-record")
-            RecordingStatus.started(MediaType.AUDIO)
+            RecordingStatus.started(MediaType.AUDIO, RecordingSource.MIC)
         } catch (e: Exception) {
             RecordingStatus.reportError(e.message ?: "Couldn't start audio recording")
             cleanupAfterFailure()
@@ -77,6 +93,8 @@ class AudioRecordService : Service() {
         runCatching { outputPfd?.close() }
         recorder = null
         outputPfd = null
+        runCatching { noiseSuppressor?.release() }
+        noiseSuppressor = null
         releaseWakeLock()
 
         if (finishedTarget != null) {
@@ -98,6 +116,8 @@ class AudioRecordService : Service() {
         recorder = null
         runCatching { outputPfd?.close() }
         outputPfd = null
+        runCatching { noiseSuppressor?.release() }
+        noiseSuppressor = null
         releaseWakeLock()
         RecordingStatus.stopped()
         stopForeground(STOP_FOREGROUND_REMOVE)

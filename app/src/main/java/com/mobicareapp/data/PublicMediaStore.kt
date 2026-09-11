@@ -3,18 +3,18 @@ package com.mobicareapp.data
 import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
-import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 
 /**
- * Saves into the phone's public Movies/YTSaver or Music/YTSaver folders (API
- * 29+) so files show up in Gallery, file managers, and music/video apps —
- * not just this app's own Library tab.
+ * Can save into the phone's public Movies/YTSaver or Music/YTSaver folders (API 29+) so files
+ * show up in Gallery, file managers, and music/video apps — not just this app's own Library tab.
+ * Kept disabled: this app is meant to be private, so every caller of this object instead falls
+ * back to its own app-scoped storage (not visible to Gallery or other apps) unconditionally.
  */
 object PublicMediaStore {
 
-    fun isSupported(): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+    fun isSupported(): Boolean = false
 
     fun createPendingTarget(context: Context, type: MediaType, fileName: String, mimeType: String): Uri {
         val resolver = context.contentResolver

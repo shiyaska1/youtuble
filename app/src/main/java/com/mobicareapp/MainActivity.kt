@@ -15,7 +15,6 @@ import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
-import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.ActivityResultLauncher
@@ -43,23 +42,28 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.fragment.app.FragmentActivity
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.mobicareapp.applock.AppLockManager
+import com.mobicareapp.applock.AppLockScreen
+import com.mobicareapp.applock.canUseAppLock
 import com.mobicareapp.data.SavedMedia
 import com.mobicareapp.ui.home.HomeScreen
 import com.mobicareapp.ui.library.LibraryScreen
 import com.mobicareapp.ui.nav.ContactBanner
 import com.mobicareapp.ui.player.PipState
 import com.mobicareapp.ui.browser.BrowserScreen
+import com.mobicareapp.ui.browser.openInBrowse
 import com.mobicareapp.ui.player.PlayerScreen
 import com.mobicareapp.ui.record.RecordScreen
 import com.mobicareapp.ui.scan.ScanScreen
 import com.mobicareapp.ui.theme.YtSaverTheme
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
 
     private val pipActionReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -79,9 +83,10 @@ class MainActivity : ComponentActivity() {
             @Suppress("UnspecifiedRegisterReceiverFlag")
             registerReceiver(pipActionReceiver, filter)
         }
+        AppLockManager.registerLifecycleObserver()
         setContent {
             YtSaverTheme {
-                AppRoot()
+                AppRoot(this)
             }
         }
     }
@@ -131,7 +136,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun AppRoot() {
+private fun AppRoot(activity: FragmentActivity) {
     val context = LocalContext.current
     val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
     val batteryOptimizationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {}
@@ -141,6 +146,12 @@ private fun AppRoot() {
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
         requestUnrestrictedBatteryOnce(context, batteryOptimizationLauncher)
+    }
+
+    val appLocked by AppLockManager.locked.collectAsState()
+    if (appLocked && canUseAppLock(activity)) {
+        AppLockScreen(activity, onUnlocked = { AppLockManager.unlock() })
+        return
     }
 
     val navController = rememberNavController()
@@ -164,7 +175,10 @@ private fun AppRoot() {
                             videoRequest = VideoQueueRequest(queue, startIndex, loop)
                             navController.navigate("player")
                         },
-                        onOpenBrowser = { navController.navigate("browser") }
+                        onOpenBrowser = { url ->
+                            if (url != null) openInBrowse(url)
+                            navController.navigate("browser")
+                        }
                     )
                 }
                 composable("browser") {
@@ -196,7 +210,7 @@ private fun AppRoot() {
 private data class VideoQueueRequest(val queue: List<SavedMedia>, val startIndex: Int, val loop: Boolean)
 
 @Composable
-private fun MainScaffold(onOpenVideo: (List<SavedMedia>, Int, Boolean) -> Unit, onOpenBrowser: () -> Unit) {
+private fun MainScaffold(onOpenVideo: (List<SavedMedia>, Int, Boolean) -> Unit, onOpenBrowser: (String?) -> Unit) {
     var selectedTab by remember { mutableStateOf(0) }
 
     Scaffold(

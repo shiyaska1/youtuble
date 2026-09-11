@@ -7,6 +7,7 @@ import com.mobicareapp.data.MediaType
 import com.mobicareapp.download.DownloadService
 import com.mobicareapp.extract.DirectLinkFetcher
 import com.mobicareapp.extract.FetchedStream
+import com.mobicareapp.extract.GenericVideoFetcher
 import com.mobicareapp.extract.MediaOption
 import com.mobicareapp.extract.YoutubeStreamFetcher
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -59,12 +60,26 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
         val id = nextId.incrementAndGet()
         _uiState.update { it.copy(urlText = "", queue = it.queue + QueuedLink(id, url, QueueStatus.Loading)) }
+        fetchInto(id, url)
+    }
 
+    /** Re-runs the same fetch for an already-queued link — used after "Sign in" closes, once a session cookie may now exist. */
+    fun retry(id: Long) {
+        val url = _uiState.value.queue.find { it.id == id }?.urlText ?: return
+        updateQueueItem(id) { QueueStatus.Loading }
+        fetchInto(id, url)
+    }
+
+    private fun fetchInto(id: Long, url: String) {
         viewModelScope.launch {
             val result = if (DirectLinkFetcher.looksLikeYoutubeUrl(url)) {
                 YoutubeStreamFetcher.fetch(url)
             } else {
-                DirectLinkFetcher.fetch(url)
+                // Most pasted links are either the file itself (DirectLinkFetcher) or a normal
+                // page that embeds a video (GenericVideoFetcher scrapes its meta tags) — try the
+                // cheap direct check first and only fall back to fetching+parsing the whole page
+                // when that link turns out not to be a raw file.
+                DirectLinkFetcher.fetch(url).recoverCatching { GenericVideoFetcher.fetch(url).getOrThrow() }
             }
             result
                 .onSuccess { stream -> updateQueueItem(id) { QueueStatus.Ready(stream, stream.title) } }
@@ -109,7 +124,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             fileExtension = option.fileExtension,
             mimeType = option.mimeType,
             thumbnailUrl = status.stream.thumbnailUrl,
-            durationSeconds = status.stream.durationSeconds
+            durationSeconds = status.stream.durationSeconds,
+            cookie = option.cookie,
+            referer = option.referer
         )
         removeFromQueue(id)
     }

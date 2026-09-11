@@ -8,7 +8,13 @@ data class MediaOption(
     val streamUrl: String,
     val fileExtension: String,
     val mimeType: String,
-    val label: String
+    val label: String,
+    // Set for links scraped off a page (GenericVideoFetcher) whose host checks that a download
+    // request's Referer matches the page that linked it — null wherever that doesn't apply.
+    val referer: String? = null,
+    // Carries a signed-in session cookie (from the shared, app-wide WebView CookieManager) for
+    // sites that only serve their video to the same session that's logged in — null if none.
+    val cookie: String? = null
 )
 
 data class FetchedStream(
