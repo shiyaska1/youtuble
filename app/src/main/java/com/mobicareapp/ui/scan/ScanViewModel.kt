@@ -12,8 +12,10 @@ import com.google.mlkit.vision.documentscanner.GmsDocumentScanning
 import com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult
 import com.mobicareapp.YtSaverApp
 import com.mobicareapp.data.ScannedDocument
+import com.mobicareapp.scan.ScanCombineStore
 import com.mobicareapp.scan.ScanFileStore
 import com.mobicareapp.scan.ScanPage
+import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -47,6 +49,9 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
     private val _saving = MutableStateFlow(false)
     val saving: StateFlow<Boolean> = _saving.asStateFlow()
 
+    private val _combining = MutableStateFlow(false)
+    val combining: StateFlow<Boolean> = _combining.asStateFlow()
+
     private val scanner = GmsDocumentScanning.getClient(
         GmsDocumentScannerOptions.Builder()
             .setGalleryImportAllowed(false)
@@ -64,6 +69,17 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
         val pages = scanResult.pages?.map { ReviewPage(it.imageUri) } ?: return
         if (pages.isEmpty()) return
         _reviewPages.value = pages
+    }
+
+    /**
+     * Adds pages picked from the gallery onto the review list — appended after whatever the
+     * document scanner already captured (e.g. a photo of an ID card's back taken earlier and
+     * saved to the gallery, added alongside the front just scanned), or starting a fresh review
+     * from gallery pages alone if none is in progress yet.
+     */
+    fun addGalleryPages(uris: List<Uri>) {
+        if (uris.isEmpty()) return
+        _reviewPages.update { (it ?: emptyList()) + uris.map { uri -> ReviewPage(uri) } }
     }
 
     fun rotatePage(index: Int) {
@@ -100,6 +116,35 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
             )
             _reviewPages.value = null
             _saving.value = false
+        }
+    }
+
+    /**
+     * Builds a new single-page document (e.g. an ID card's front+back stacked on one A4 sheet)
+     * from [pagePaths] of an existing scan, and saves it as its own [ScannedDocument] alongside
+     * the original — the source scan is left untouched.
+     */
+    fun combinePages(pagePaths: List<String>, sizeFraction: Float, gapMm: Float, onDone: () -> Unit) {
+        if (pagePaths.size < 2) return
+        _combining.value = true
+        viewModelScope.launch(Dispatchers.IO) {
+            val context = getApplication<YtSaverApp>()
+            val baseName = ScanFileStore.newBaseName() + "-Combined"
+            val saved = ScanCombineStore.buildCombinedPage(
+                context, pagePaths.map { File(it) }, sizeFraction, gapMm, baseName
+            )
+            database.scannedDocumentDao().insert(
+                ScannedDocument(
+                    name = baseName,
+                    pageCount = 1,
+                    filePath = saved.pdfFile.absolutePath,
+                    thumbnailPath = saved.thumbnailFile.absolutePath,
+                    createdAt = System.currentTimeMillis(),
+                    pagePaths = saved.pageFiles.map { it.absolutePath }
+                )
+            )
+            _combining.value = false
+            onDone()
         }
     }
 

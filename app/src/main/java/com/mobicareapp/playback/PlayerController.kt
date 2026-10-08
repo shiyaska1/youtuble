@@ -54,6 +54,8 @@ object PlayerController {
 
     suspend fun skipPrevious(context: Context) = get(context).seekToPreviousMediaItem()
 
+    suspend fun seekTo(context: Context, positionMs: Long) = get(context).seekTo(positionMs)
+
     suspend fun stop(context: Context) {
         val c = get(context)
         c.stop()

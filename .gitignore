@@ -8,3 +8,9 @@
 /captures
 .externalNativeBuild
 .cxx
+
+# Kotlin compiler cache (generated)
+.kotlin/
+
+# Server-side script holds the upload secret for the personal server — the repo is public, so it is never committed
+/server/

@@ -34,15 +34,20 @@ object RecordFileStore {
         return "${prefix}_$stamp"
     }
 
-    fun createTarget(context: Context, type: MediaType, baseName: String): RecordTarget {
-        val mimeType = if (type == MediaType.VIDEO) "video/mp4" else "audio/mp4"
+    fun createTarget(
+        context: Context,
+        type: MediaType,
+        baseName: String,
+        fileExtension: String = "mp4",
+        mimeType: String = if (type == MediaType.VIDEO) "video/mp4" else "audio/mp4"
+    ): RecordTarget {
         return if (PublicMediaStore.isSupported()) {
-            RecordTarget.MediaStoreUri(PublicMediaStore.createPendingTarget(context, type, "$baseName.mp4", mimeType))
+            RecordTarget.MediaStoreUri(PublicMediaStore.createPendingTarget(context, type, "$baseName.$fileExtension", mimeType))
         } else {
             val subDir = if (type == MediaType.VIDEO) Environment.DIRECTORY_MOVIES else Environment.DIRECTORY_MUSIC
             val dir = context.getExternalFilesDir(subDir) ?: context.filesDir
             dir.mkdirs()
-            RecordTarget.LegacyFile(File(dir, "$baseName.mp4"))
+            RecordTarget.LegacyFile(File(dir, "$baseName.$fileExtension"))
         }
     }
 
@@ -87,7 +92,12 @@ object RecordFileStore {
         target: RecordTarget,
         type: MediaType,
         caption: String,
-        categoryName: String = if (type == MediaType.VIDEO) "Video" else "Audio"
+        categoryName: String = if (type == MediaType.VIDEO) "Video" else "Audio",
+        fileExtension: String = "mp4",
+        // Library hides audio tagged "recording" behind the 7-tap gesture (see LibraryViewModel).
+        // A caller producing audio that isn't a background recording — e.g. text-to-speech output
+        // the user explicitly asked to generate — passes a different value so it stays visible.
+        sourceUrl: String = "recording"
     ) {
         val storedPath: String
         val sizeBytes: Long
@@ -115,10 +125,10 @@ object RecordFileStore {
         app.database.savedMediaDao().insert(
             SavedMedia(
                 caption = caption,
-                sourceUrl = "recording",
+                sourceUrl = sourceUrl,
                 type = type,
                 filePath = storedPath,
-                fileName = "$caption.mp4",
+                fileName = "$caption.$fileExtension",
                 thumbnailUrl = null,
                 sizeBytes = sizeBytes,
                 durationSeconds = 0,
@@ -126,5 +136,6 @@ object RecordFileStore {
                 categoryId = categoryId
             )
         )
+        RecordingStatus.finished(type, storedPath)
     }
 }

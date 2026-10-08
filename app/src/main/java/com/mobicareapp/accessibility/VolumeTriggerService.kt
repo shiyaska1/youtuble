@@ -8,6 +8,7 @@ import android.view.KeyEvent
 import android.view.accessibility.AccessibilityEvent
 import com.mobicareapp.record.AudioRecordService
 import com.mobicareapp.record.RecordingStatus
+import com.mobicareapp.record.VoiceActivationSettings
 
 /**
  * Watches the volume buttons system-wide — something only an Accessibility Service can do on
@@ -15,6 +16,10 @@ import com.mobicareapp.record.RecordingStatus
  * so pressing Volume Up 3 times quickly toggles audio recording even with the screen off or a
  * different app open. The volume change itself still goes through untouched (onKeyEvent returns
  * false), so this never interferes with actually adjusting the volume.
+ *
+ * A shake-to-start trigger used to live here too, removed after it proved too easily set off by
+ * ordinary handling (walking, a pocket, a bag) — unlike a deliberate volume-button press, an
+ * accelerometer spike can't reliably tell "the user meant this" apart from "the phone got jostled."
  *
  * This service does nothing with screen content — [onAccessibilityEvent] is unused — the
  * `canRequestFilterKeyEvents` flag in accessibility_service_config.xml is what's actually being
@@ -45,9 +50,11 @@ class VolumeTriggerService : AccessibilityService() {
 
     private fun toggleRecording() {
         if (RecordingStatus.active.value != null) {
-            AudioRecordService.stop(this)
+            // No screen/dialog is available from this trigger, so let the widget/tile path's
+            // background auto-transcribe run instead of silently dropping that option.
+            AudioRecordService.stop(this, autoTranscribe = true)
         } else {
-            AudioRecordService.start(this)
+            AudioRecordService.start(this, VoiceActivationSettings.isEnabled(this))
         }
     }
 

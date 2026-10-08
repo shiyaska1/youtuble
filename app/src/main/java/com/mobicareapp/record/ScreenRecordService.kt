@@ -383,18 +383,25 @@ class ScreenRecordService : Service() {
             is RecordTarget.LegacyFile -> finishedTarget.file.length()
             else -> 0L
         }
-        if (finishedTarget != null && sizeBytes > 0L) {
-            val caption = RecordFileStore.timestampedName(MediaType.VIDEO)
-            serviceScope.launch {
-                RecordFileStore.finalizeAndSave(applicationContext, finishedTarget, MediaType.VIDEO, caption)
-            }
-        } else if (finishedTarget != null) {
-            RecordFileStore.abandon(this, finishedTarget)
-        }
         target = null
         RecordingStatus.stopped()
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
+
+        // The service must stay alive — and serviceScope uncancelled — until the file is actually
+        // finalized and inserted into the Library. Calling stopSelf() right after merely launching
+        // that work let Android destroy the service (cancelling serviceScope, via onDestroy)
+        // before it finished, which is exactly why a recording would only sometimes fail to save —
+        // most easily triggered right after a fresh install, when the first-ever database write is
+        // slower (cold Room/SQLite init) than usual, giving Android more of a window to win the race.
+        serviceScope.launch {
+            if (finishedTarget != null && sizeBytes > 0L) {
+                val caption = RecordFileStore.timestampedName(MediaType.VIDEO)
+                RecordFileStore.finalizeAndSave(applicationContext, finishedTarget, MediaType.VIDEO, caption)
+            } else if (finishedTarget != null) {
+                RecordFileStore.abandon(this@ScreenRecordService, finishedTarget)
+            }
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+        }
     }
 
     private fun cleanupAfterFailure() {

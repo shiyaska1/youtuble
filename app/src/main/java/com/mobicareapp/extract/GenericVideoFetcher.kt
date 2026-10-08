@@ -82,7 +82,7 @@ object GenericVideoFetcher {
                 thumbnailUrl = thumbnail,
                 durationSeconds = 0,
                 sourceUrl = url,
-                videoOption = option,
+                videoOptions = listOf(option),
                 audioOption = null
             )
         }

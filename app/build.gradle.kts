@@ -105,6 +105,33 @@ dependencies {
     // crop, multi-page capture) instead of a hand-rolled CameraX flow.
     implementation("com.google.android.gms:play-services-mlkit-document-scanner:16.0.0")
 
+    // On-device person/background segmentation for the passport-photo background fill.
+    implementation("com.google.mlkit:segmentation-selfie:16.0.0-beta6")
+
+    // On-device face detection for the passport photo — finds the head so the crop can size and
+    // position it to actual passport-photo proportions, instead of just center-cropping whatever
+    // framing the original photo happened to have.
+    implementation("com.google.mlkit:face-detection:16.1.7")
+
+    // On-device OCR for the PDF text-extraction tool: Latin script covers English, a separate
+    // recognizer model covers Devanagari script (Hindi) — ML Kit doesn't ship one for Malayalam or
+    // Arabic script at all, on-device or otherwise.
+    implementation("com.google.mlkit:text-recognition:16.0.0")
+    implementation("com.google.mlkit:text-recognition-devanagari:16.0.0")
+
+    // Malayalam OCR: ML Kit has no recognizer for it at all, so this uses the open-source
+    // Tesseract engine instead (via this actively-maintained Android wrapper) with Google's own
+    // "fast" Malayalam trained data, bundled as an asset (see app/src/main/assets/tessdata).
+    // Generally less accurate than ML Kit's own supported languages — Malayalam's vowel signs are
+    // known to challenge Tesseract's left-to-right assumptions — but it's the only free, offline
+    // option that exists for this script.
+    implementation("cz.adaptech.tesseract4android:tesseract4android:4.9.0")
+
+    // Reads a PDF page's own embedded text layer directly when it has one, instead of always
+    // rendering the page to a bitmap and OCR-ing it — faster and perfectly accurate for a PDF
+    // that came from a real document rather than a scan. Pure Java/Kotlin, no native libs.
+    implementation("com.tom-roush:pdfbox-android:2.0.27.0")
+
     // Video conversion for formats Android's own MediaCodec can't decode at all (the same
     // situation MX Player handles by bundling its own decoders rather than relying on the OS).
     // The original FFmpegKit (com.arthenica:ffmpeg-kit-full-gpl) was retired and pulled from

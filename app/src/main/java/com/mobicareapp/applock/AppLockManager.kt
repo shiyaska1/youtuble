@@ -23,9 +23,27 @@ object AppLockManager {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val clearSuppression = Runnable { suppressed = false }
     @Volatile private var suppressed = false
+    @Volatile private var holdCount = 0
 
     fun unlock() {
         _locked.value = false
+    }
+
+    /**
+     * Suppresses locking entirely for as long as something holds it, unlike [suppressNextLock],
+     * which only covers a single upcoming background/foreground cycle before clearing itself.
+     * Meant for a screen holding meaningful unsaved in-memory state (like an image markup canvas'
+     * strokes) for an open-ended amount of time — a lock triggered by, say, the screen timing out
+     * mid-edit would otherwise silently discard that work the same way the nav-graph swap already
+     * does for [suppressNextLock]'s picker case. Call [releaseLockHold] exactly once for every
+     * [acquireLockHold] (a screen's `DisposableEffect` is the natural place for both).
+     */
+    fun acquireLockHold() {
+        holdCount++
+    }
+
+    fun releaseLockHold() {
+        if (holdCount > 0) holdCount--
     }
 
     /**
@@ -49,6 +67,7 @@ object AppLockManager {
         observerRegistered = true
         ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
             override fun onStop(owner: LifecycleOwner) {
+                if (holdCount > 0) return
                 if (suppressed) {
                     suppressed = false
                     mainHandler.removeCallbacks(clearSuppression)

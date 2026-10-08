@@ -13,6 +13,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -37,7 +38,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Autorenew
 import androidx.compose.material.icons.filled.CallMerge
-import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Close
@@ -54,12 +54,14 @@ import androidx.compose.material.icons.filled.MusicOff
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Compress
 import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.SkipNext
-import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideoLibrary
+import androidx.compose.material.icons.filled.Subtitles
+import androidx.compose.material.icons.filled.WifiTethering
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Card
@@ -69,6 +71,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -90,6 +93,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -107,6 +111,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
@@ -119,7 +124,12 @@ import com.mobicareapp.data.SavedMedia
 import com.mobicareapp.download.DownloadService
 import com.mobicareapp.playback.PlayerController
 import com.mobicareapp.process.NoiseFilterProcessor
+import com.mobicareapp.record.RecordingStatus
+import com.mobicareapp.ui.transcribe.TranscribeDialog
+import com.mobicareapp.ui.upload.UploadLinkScreen
+import com.mobicareapp.wifisend.WifiSendDialog
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -127,6 +137,11 @@ import java.text.DateFormat
 import java.util.Date
 import kotlin.math.roundToInt
 
+private val CATEGORY_OPTIONS = listOf(
+    "All" to CategoryFilter.ALL,
+    "Video" to CategoryFilter.VIDEO,
+    "Audio (MP3)" to CategoryFilter.AUDIO
+)
 private val SORT_OPTIONS = listOf(
     "Newest first" to SortOption.DATE_NEWEST,
     "Oldest first" to SortOption.DATE_OLDEST,
@@ -161,6 +176,15 @@ fun LibraryScreen(
     val downloadProgress by DownloadService.progress.collectAsState()
     val queuedDownloads by DownloadService.queueSize.collectAsState()
 
+    // A freshly-recorded video would otherwise be invisible under Library's default Audio-only
+    // filter — nothing "failed" to save, it's just hidden — so recording a video switches the
+    // filter to match, the same way it'd be reasonable to expect after just recording one.
+    val lastFinishedRecording by RecordingStatus.lastFinished.collectAsState()
+    LaunchedEffect(lastFinishedRecording) {
+        val finished = lastFinishedRecording ?: return@LaunchedEffect
+        viewModel.onCategoryChanged(if (finished.type == MediaType.VIDEO) CategoryFilter.VIDEO else CategoryFilter.AUDIO)
+    }
+
     var pendingDelete by remember { mutableStateOf<SavedMedia?>(null) }
     var pendingBulkDelete by remember { mutableStateOf(false) }
     var pendingRename by remember { mutableStateOf<SavedMedia?>(null) }
@@ -175,6 +199,10 @@ fun LibraryScreen(
     var pendingReplaceAudio by remember { mutableStateOf<SavedMedia?>(null) }
     var pendingMergeOrder by remember { mutableStateOf<List<SavedMedia>?>(null) }
     var pendingRotate by remember { mutableStateOf<SavedMedia?>(null) }
+    var pendingCompress by remember { mutableStateOf<SavedMedia?>(null) }
+    var wifiSendFile by remember { mutableStateOf<File?>(null) }
+    var transcribingFile by remember { mutableStateOf<File?>(null) }
+    var uploadLinkFile by remember { mutableStateOf<File?>(null) }
 
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris: List<Uri> ->
         viewModel.importVideos(uris)
@@ -384,6 +412,34 @@ fun LibraryScreen(
         )
     }
 
+    pendingCompress?.let { item ->
+        CompressDialog(
+            item = item,
+            onDismiss = { pendingCompress = null },
+            onApply = { quality ->
+                viewModel.compressVideo(item, quality)
+                pendingCompress = null
+            }
+        )
+    }
+
+    wifiSendFile?.let { file ->
+        WifiSendDialog(file = file, onDismiss = { wifiSendFile = null })
+    }
+
+    transcribingFile?.let { file ->
+        TranscribeDialog(file = file, onDismiss = { transcribingFile = null })
+    }
+
+    uploadLinkFile?.let { file ->
+        androidx.compose.ui.window.Dialog(
+            onDismissRequest = { uploadLinkFile = null },
+            properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            UploadLinkScreen(initialFile = file, onBack = { uploadLinkFile = null })
+        }
+    }
+
     pendingMergeOrder?.let { items ->
         MergeOrderDialog(
             items = items,
@@ -395,10 +451,36 @@ fun LibraryScreen(
         )
     }
 
+    // 7 taps on the title within 2 seconds reveals/hides recorded audio (see LibraryViewModel's
+    // hiddenRecordingsUnlocked) — the same "tap N times to unlock a hidden mode" pattern Android
+    // itself uses for Developer Options, so a quick, deliberate action rather than a stray tap.
+    var titleTapCount by remember { mutableStateOf(0) }
+    var titleTapWindowStart by remember { mutableStateOf(0L) }
+
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Library") },
+                title = {
+                    Text(
+                        "Library",
+                        modifier = Modifier.clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() }
+                        ) {
+                            val now = System.currentTimeMillis()
+                            if (now - titleTapWindowStart > 2000) {
+                                titleTapWindowStart = now
+                                titleTapCount = 1
+                            } else {
+                                titleTapCount++
+                            }
+                            if (titleTapCount >= 7) {
+                                titleTapCount = 0
+                                viewModel.toggleHiddenRecordings()
+                            }
+                        }
+                    )
+                },
                 actions = {
                     IconButton(onClick = {
                         AppLockManager.suppressNextLock()
@@ -427,45 +509,32 @@ fun LibraryScreen(
         snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { padding ->
         Column(modifier = Modifier.padding(padding)) {
-            OutlinedTextField(
-                value = state.query,
-                onValueChange = viewModel::onQueryChanged,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                singleLine = true,
-                label = { Text("Search by name") },
-                trailingIcon = {
-                    if (state.query.isNotEmpty()) {
-                        IconButton(onClick = { viewModel.onQueryChanged("") }) {
-                            Icon(Icons.Default.Clear, contentDescription = "Clear search")
-                        }
-                    }
-                }
-            )
-
+            // The search box and the three All/Video/Audio buttons were pushing the actual list
+            // down and, combined with the now-playing bar overlaid at the bottom, left little
+            // room to see items on smaller screens — folded down to one dropdown, with the
+            // playing-track bar moved up here (compact, inline) instead of floating over the list.
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp),
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                FilterChip(
-                    selected = state.category == CategoryFilter.ALL,
-                    onClick = { viewModel.onCategoryChanged(CategoryFilter.ALL) },
-                    label = { Text("All") }
+                FilterDropdown(
+                    currentLabel = CATEGORY_OPTIONS.first { it.second == state.category }.first,
+                    options = CATEGORY_OPTIONS,
+                    onSelect = viewModel::onCategoryChanged
                 )
-                FilterChip(
-                    selected = state.category == CategoryFilter.VIDEO,
-                    onClick = { viewModel.onCategoryChanged(CategoryFilter.VIDEO) },
-                    label = { Text("Video") }
-                )
-                FilterChip(
-                    selected = state.category == CategoryFilter.AUDIO,
-                    onClick = { viewModel.onCategoryChanged(CategoryFilter.AUDIO) },
-                    label = { Text("Audio (MP3)") }
+                AlbumFilterDropdown(
+                    currentLabel = albumFilterLabel(state.albumFilter, state.albums),
+                    albumFilter = state.albumFilter,
+                    albums = state.albums,
+                    onSelect = viewModel::onAlbumFilterChanged,
+                    onNewCategory = { pendingNewCategory = true }
                 )
             }
+
+            CompactNowPlayingBar(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp))
 
             if (state.category != CategoryFilter.ALL && state.items.isNotEmpty()) {
                 PlayAllRow(
@@ -477,37 +546,6 @@ fun LibraryScreen(
                             viewModel.playAudioQueue(state.items, 0, loop)
                         }
                     }
-                )
-            }
-
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 4.dp)
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                FilterChip(
-                    selected = state.albumFilter == AlbumFilter.All,
-                    onClick = { viewModel.onAlbumFilterChanged(AlbumFilter.All) },
-                    label = { Text("All categories") }
-                )
-                FilterChip(
-                    selected = state.albumFilter == AlbumFilter.Uncategorized,
-                    onClick = { viewModel.onAlbumFilterChanged(AlbumFilter.Uncategorized) },
-                    label = { Text("Uncategorized") }
-                )
-                state.albums.forEach { album ->
-                    FilterChip(
-                        selected = state.albumFilter == AlbumFilter.ById(album.id),
-                        onClick = { viewModel.onAlbumFilterChanged(AlbumFilter.ById(album.id)) },
-                        label = { Text(album.name) }
-                    )
-                }
-                AssistChip(
-                    onClick = { pendingNewCategory = true },
-                    label = { Text("New category") },
-                    leadingIcon = { Icon(Icons.Default.Add, contentDescription = null) }
                 )
             }
 
@@ -588,9 +626,8 @@ fun LibraryScreen(
                 }
             }
 
-            Box(modifier = Modifier.fillMaxSize()) {
-                LazyColumn(modifier = Modifier.fillMaxSize()) {
-                    items(state.items, key = { it.id }) { item ->
+            LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                items(state.items, key = { it.id }) { item ->
                         LibraryRow(
                             item = item,
                             categoryName = state.albums.find { it.id == item.categoryId }?.name,
@@ -624,6 +661,9 @@ fun LibraryScreen(
                                 AppLockManager.suppressNextLock()
                                 shareMedia(context, item)
                             },
+                            onSendOverWifi = { wifiSendFile = File(item.filePath) },
+                            onGetLink = { uploadLinkFile = File(item.filePath) },
+                            onTranscribe = { transcribingFile = File(item.filePath) },
                             onExport = {
                                 pendingExport = item
                                 AppLockManager.suppressNextLock()
@@ -634,13 +674,11 @@ fun LibraryScreen(
                             onCrop = { pendingCrop = item },
                             onRemoveAudio = { viewModel.removeAudio(item) },
                             onReplaceAudio = { pendingReplaceAudio = item },
-                            onRotate = { pendingRotate = item }
+                            onRotate = { pendingRotate = item },
+                            onCompress = { pendingCompress = item }
                         )
                     }
                 }
-
-                NowPlayingBar(modifier = Modifier.align(Alignment.BottomCenter))
-            }
         }
     }
 }
@@ -1038,6 +1076,43 @@ private fun RotateDialog(item: SavedMedia, onDismiss: () -> Unit, onApply: (degr
 }
 
 @Composable
+private fun CompressDialog(item: SavedMedia, onDismiss: () -> Unit, onApply: (com.mobicareapp.edit.VideoQuality) -> Unit) {
+    var quality by remember { mutableStateOf(com.mobicareapp.edit.VideoQuality.P480) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Reduce file size of \"${item.caption}\"") },
+        text = {
+            Column {
+                Text(
+                    "Saves a smaller copy at a lower resolution and bitrate — good for sharing. This re-encodes the whole video, so it can take a while. The original is kept untouched.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(12.dp))
+                com.mobicareapp.edit.VideoQuality.entries.forEach { option ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { quality = option },
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(selected = quality == option, onClick = { quality = option })
+                        Text(option.label)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onApply(quality) }) { Text("Compress & save copy") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
+}
+
+@Composable
 private fun MergeOrderDialog(items: List<SavedMedia>, onDismiss: () -> Unit, onApply: (List<SavedMedia>) -> Unit) {
     var ordered by remember { mutableStateOf(items) }
 
@@ -1402,6 +1477,49 @@ private fun <T> FilterDropdown(currentLabel: String, options: List<Pair<String, 
     }
 }
 
+private fun albumFilterLabel(filter: AlbumFilter, albums: List<MediaCategory>): String = when (filter) {
+    AlbumFilter.All -> "All categories"
+    AlbumFilter.Uncategorized -> "Uncategorized"
+    is AlbumFilter.ById -> albums.find { it.id == filter.id }?.name ?: "Category"
+}
+
+/** Like [FilterDropdown], but with a trailing "New category" action mixed into the same menu instead of a separate chip — one dropdown instead of a whole row of chips to scroll through. */
+@Composable
+private fun AlbumFilterDropdown(
+    currentLabel: String,
+    albumFilter: AlbumFilter,
+    albums: List<MediaCategory>,
+    onSelect: (AlbumFilter) -> Unit,
+    onNewCategory: () -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        AssistChip(onClick = { expanded = true }, label = { Text(currentLabel) })
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            DropdownMenuItem(
+                text = { Text("All categories") },
+                onClick = { onSelect(AlbumFilter.All); expanded = false }
+            )
+            DropdownMenuItem(
+                text = { Text("Uncategorized") },
+                onClick = { onSelect(AlbumFilter.Uncategorized); expanded = false }
+            )
+            albums.forEach { album ->
+                DropdownMenuItem(
+                    text = { Text(album.name) },
+                    onClick = { onSelect(AlbumFilter.ById(album.id)); expanded = false }
+                )
+            }
+            HorizontalDivider()
+            DropdownMenuItem(
+                text = { Text("New category") },
+                onClick = { expanded = false; onNewCategory() },
+                leadingIcon = { Icon(Icons.Default.Add, contentDescription = null) }
+            )
+        }
+    }
+}
+
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun LibraryRow(
@@ -1422,12 +1540,16 @@ private fun LibraryRow(
     onInsertClip: () -> Unit,
     onAddOverlay: () -> Unit,
     onShare: () -> Unit,
+    onSendOverWifi: () -> Unit,
+    onGetLink: () -> Unit,
+    onTranscribe: () -> Unit,
     onExport: () -> Unit,
     onConvert: () -> Unit,
     onCrop: () -> Unit,
     onRemoveAudio: () -> Unit,
     onReplaceAudio: () -> Unit,
-    onRotate: () -> Unit
+    onRotate: () -> Unit,
+    onCompress: () -> Unit
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
     val busy = isDenoising || isEditing
@@ -1489,6 +1611,27 @@ private fun LibraryRow(
                     onClick = { menuExpanded = false; onShare() },
                     leadingIcon = { Icon(Icons.Default.Share, contentDescription = null) }
                 )
+                // Only for files actually stored in the app (not a content:// URI from an
+                // import that wasn't copied in) — the local Wi-Fi server needs a real File.
+                if (!item.filePath.startsWith("content://")) {
+                    DropdownMenuItem(
+                        text = { Text("Send over Wi-Fi") },
+                        onClick = { menuExpanded = false; onSendOverWifi() },
+                        leadingIcon = { Icon(Icons.Default.WifiTethering, contentDescription = null) }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Get share link (upload)") },
+                        onClick = { menuExpanded = false; onGetLink() },
+                        leadingIcon = { Icon(Icons.Default.CloudUpload, contentDescription = null) }
+                    )
+                }
+                if (item.type == MediaType.AUDIO && !item.filePath.startsWith("content://")) {
+                    DropdownMenuItem(
+                        text = { Text("Transcribe") },
+                        onClick = { menuExpanded = false; onTranscribe() },
+                        leadingIcon = { Icon(Icons.Default.Subtitles, contentDescription = null) }
+                    )
+                }
                 DropdownMenuItem(
                     text = { Text("Save to phone") },
                     onClick = { menuExpanded = false; onExport() },
@@ -1516,6 +1659,11 @@ private fun LibraryRow(
                         text = { Text("Add overlay (picture-in-picture)…") },
                         onClick = { menuExpanded = false; onAddOverlay() },
                         leadingIcon = { Icon(Icons.Default.PictureInPictureAlt, contentDescription = null) }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Reduce file size…") },
+                        onClick = { menuExpanded = false; onCompress() },
+                        leadingIcon = { Icon(Icons.Default.Compress, contentDescription = null) }
                     )
                     DropdownMenuItem(
                         text = { Text("Remove audio (mute)") },
@@ -1573,8 +1721,13 @@ private fun shareMedia(context: Context, item: SavedMedia) {
     context.startActivity(Intent.createChooser(intent, item.caption))
 }
 
+/**
+ * A slim now-playing strip shown inline next to the category dropdown, up where the search box
+ * used to be — replaces the old card that floated over the bottom of the list (hiding whatever
+ * items were underneath it) with something that takes its own place in the layout instead.
+ */
 @Composable
-private fun NowPlayingBar(modifier: Modifier = Modifier) {
+private fun CompactNowPlayingBar(modifier: Modifier = Modifier) {
     val controller by PlayerController.controller.collectAsState()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -1582,6 +1735,12 @@ private fun NowPlayingBar(modifier: Modifier = Modifier) {
     var title by remember { mutableStateOf("") }
     var isPlaying by remember { mutableStateOf(false) }
     var hasMedia by remember { mutableStateOf(false) }
+    var durationMs by remember { mutableLongStateOf(0L) }
+    var positionMs by remember { mutableLongStateOf(0L) }
+    // While the user is actively dragging, the slider shows their drag position rather than
+    // playback's own position — otherwise the periodic position poll below would fight the drag,
+    // snapping the thumb back to wherever real playback is on every refresh.
+    var draggingToMs by remember { mutableStateOf<Long?>(null) }
 
     LaunchedEffect(controller) {
         val c = controller ?: return@LaunchedEffect
@@ -1589,6 +1748,7 @@ private fun NowPlayingBar(modifier: Modifier = Modifier) {
             title = c.mediaMetadata.title?.toString() ?: ""
             isPlaying = c.isPlaying
             hasMedia = c.mediaItemCount > 0
+            durationMs = c.duration.coerceAtLeast(0L)
         }
         refresh()
         val listener = object : androidx.media3.common.Player.Listener {
@@ -1599,27 +1759,51 @@ private fun NowPlayingBar(modifier: Modifier = Modifier) {
         c.addListener(listener)
     }
 
+    // Media3 has no "position changed" callback — only actual playback advancing it, so it's
+    // polled on a timer instead, same as the elapsed-time display on the Record screen.
+    LaunchedEffect(controller, isPlaying) {
+        val c = controller ?: return@LaunchedEffect
+        while (true) {
+            if (draggingToMs == null) positionMs = c.currentPosition.coerceAtLeast(0L)
+            delay(300)
+        }
+    }
+
     if (hasMedia) {
-        Row(
-            modifier = modifier
-                .fillMaxWidth()
-                .padding(8.dp)
-                .clip(RoundedCornerShape(12.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant)
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Text(title, modifier = Modifier.weight(1f), maxLines = 1)
-            IconButton(onClick = { scope.launch { PlayerController.skipPrevious(context) } }) {
-                Icon(Icons.Default.SkipPrevious, contentDescription = "Previous")
+        Column(modifier = modifier) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(
+                    onClick = { scope.launch { PlayerController.togglePlayPause(context) } },
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, contentDescription = "Play/Pause")
+                }
+                Text(
+                    title,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.weight(1f).padding(horizontal = 4.dp)
+                )
+                IconButton(
+                    onClick = { scope.launch { PlayerController.skipNext(context) } },
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(Icons.Default.SkipNext, contentDescription = "Next")
+                }
             }
-            IconButton(onClick = { scope.launch { PlayerController.togglePlayPause(context) } }) {
-                Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, contentDescription = "Play/Pause")
-            }
-            IconButton(onClick = { scope.launch { PlayerController.skipNext(context) } }) {
-                Icon(Icons.Default.SkipNext, contentDescription = "Next")
-            }
+            Slider(
+                value = (draggingToMs ?: positionMs).toFloat(),
+                onValueChange = { draggingToMs = it.toLong() },
+                onValueChangeFinished = {
+                    val target = draggingToMs ?: return@Slider
+                    scope.launch { PlayerController.seekTo(context, target) }
+                    positionMs = target
+                    draggingToMs = null
+                },
+                valueRange = 0f..durationMs.coerceAtLeast(1L).toFloat(),
+                modifier = Modifier.height(20.dp)
+            )
         }
     }
 }

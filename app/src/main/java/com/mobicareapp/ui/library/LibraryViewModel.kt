@@ -12,7 +12,9 @@ import com.mobicareapp.data.MediaImporter
 import com.mobicareapp.data.MediaType
 import com.mobicareapp.data.SavedMedia
 import com.mobicareapp.edit.OverlayCorner
+import com.mobicareapp.edit.CompressVideoProcessor
 import com.mobicareapp.edit.PictureInPictureProcessor
+import com.mobicareapp.edit.VideoQuality
 import com.mobicareapp.edit.ReplaceAudioProcessor
 import com.mobicareapp.edit.RotateVideoProcessor
 import com.mobicareapp.edit.VideoConvertProcessor
@@ -50,13 +52,14 @@ data class LibraryUiState(
     val items: List<SavedMedia> = emptyList(),
     val albums: List<MediaCategory> = emptyList(),
     val query: String = "",
-    val category: CategoryFilter = CategoryFilter.ALL,
+    val category: CategoryFilter = CategoryFilter.AUDIO,
     val albumFilter: AlbumFilter = AlbumFilter.All,
     val sort: SortOption = SortOption.DATE_NEWEST,
     val minSizeBytes: Long = 0,
     val minAgeDays: Int = 0,
     val selectionMode: Boolean = false,
-    val selectedIds: Set<Long> = emptySet()
+    val selectedIds: Set<Long> = emptySet(),
+    val hiddenRecordingsUnlocked: Boolean = false
 )
 
 class LibraryViewModel(application: Application) : AndroidViewModel(application) {
@@ -74,18 +77,21 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
     val editingIds: StateFlow<Set<Long>> = _editingIds.asStateFlow()
 
     private val query = MutableStateFlow("")
-    private val category = MutableStateFlow(CategoryFilter.ALL)
+    private val category = MutableStateFlow(CategoryFilter.AUDIO)
     private val albumFilter = MutableStateFlow<AlbumFilter>(AlbumFilter.All)
     private val sort = MutableStateFlow(SortOption.DATE_NEWEST)
     private val minSizeBytes = MutableStateFlow(0L)
     private val minAgeDays = MutableStateFlow(0)
     private val selectionMode = MutableStateFlow(false)
     private val selectedIds = MutableStateFlow<Set<Long>>(emptySet())
+    // Resets to hidden every time the app is (re)opened — a 7-tap on the Library title reveals
+    // recorded audio for this session only, rather than persisting "unlocked" across restarts.
+    private val hiddenRecordingsUnlocked = MutableStateFlow(false)
 
     val uiState: StateFlow<LibraryUiState> =
         combine(
             dao.observeAll(), categoryDao.observeAll(), query, category, albumFilter,
-            sort, minSizeBytes, minAgeDays, selectionMode, selectedIds
+            sort, minSizeBytes, minAgeDays, selectionMode, selectedIds, hiddenRecordingsUnlocked
         ) { values ->
             @Suppress("UNCHECKED_CAST")
             val items = values[0] as List<SavedMedia>
@@ -100,10 +106,16 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
             val selMode = values[8] as Boolean
             @Suppress("UNCHECKED_CAST")
             val selIds = values[9] as Set<Long>
+            val hiddenUnlocked = values[10] as Boolean
 
             val cutoff = if (minAge > 0) System.currentTimeMillis() - minAge * DAY_MILLIS else Long.MAX_VALUE
 
             val filtered = items
+                // Every file made via Record (audio, video, or screen — manual, voice-activated,
+                // or always-listen) is tagged sourceUrl == "recording" — kept out of the normal
+                // list until the 7-tap gesture unlocks it, so it isn't sitting in plain view if
+                // someone else picks up the phone. Imported/downloaded media isn't affected.
+                .filter { hiddenUnlocked || it.sourceUrl != "recording" }
                 .filter { cat == CategoryFilter.ALL || (cat == CategoryFilter.VIDEO) == (it.type == MediaType.VIDEO) }
                 .filter {
                     when (album) {
@@ -123,7 +135,7 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
                 SortOption.SIZE_SMALLEST -> filtered.sortedBy { it.sizeBytes }
             }
 
-            LibraryUiState(sorted, albums, q, cat, album, sortOption, minSize, minAge, selMode, selIds)
+            LibraryUiState(sorted, albums, q, cat, album, sortOption, minSize, minAge, selMode, selIds, hiddenUnlocked)
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), LibraryUiState())
 
     fun onQueryChanged(value: String) {
@@ -375,6 +387,23 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    /** Saves a smaller copy of [item] at [quality]'s resolution/bitrate, for easier sharing. */
+    fun compressVideo(item: SavedMedia, quality: VideoQuality) {
+        if (item.id in _editingIds.value) return
+        _editingIds.update { it + item.id }
+        viewModelScope.launch {
+            _snackbarMessage.value = "Compressing to ${quality.label}…"
+            val result = CompressVideoProcessor.compress(getApplication(), item, quality)
+            _editingIds.update { it - item.id }
+            result
+                .onSuccess { saved ->
+                    dao.insert(saved)
+                    _snackbarMessage.value = "Saved a smaller copy (${quality.label})"
+                }
+                .onFailure { e -> _snackbarMessage.value = "Couldn't compress: ${e.message}" }
+        }
+    }
+
     /** Rewrites [item] as a plain MP4 for videos this phone's player can't handle as-is. */
     fun convertToMp4(item: SavedMedia) {
         if (item.id in _editingIds.value) return
@@ -511,5 +540,11 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
 
     fun snackbarShown() {
         _snackbarMessage.value = null
+    }
+
+    /** Triggered by 7 taps on the Library title — reveals recordings (audio, video, screen) hidden from the normal list, or hides them again. */
+    fun toggleHiddenRecordings() {
+        hiddenRecordingsUnlocked.value = !hiddenRecordingsUnlocked.value
+        _snackbarMessage.value = if (hiddenRecordingsUnlocked.value) "Recordings shown" else "Recordings hidden"
     }
 }

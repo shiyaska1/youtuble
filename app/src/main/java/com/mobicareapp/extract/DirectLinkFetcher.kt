@@ -63,7 +63,7 @@ object DirectLinkFetcher {
                 thumbnailUrl = null,
                 durationSeconds = 0,
                 sourceUrl = url,
-                videoOption = if (isAudio) null else option,
+                videoOptions = if (isAudio) emptyList() else listOf(option),
                 audioOption = if (isAudio) option else null
             )
         }

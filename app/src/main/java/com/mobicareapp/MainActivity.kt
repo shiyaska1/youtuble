@@ -59,6 +59,7 @@ import com.mobicareapp.ui.player.PipState
 import com.mobicareapp.ui.browser.BrowserScreen
 import com.mobicareapp.ui.browser.openInBrowse
 import com.mobicareapp.ui.player.PlayerScreen
+import com.mobicareapp.record.PendingQuickRecordAction
 import com.mobicareapp.ui.record.RecordScreen
 import com.mobicareapp.ui.scan.ScanScreen
 import com.mobicareapp.ui.theme.YtSaverTheme
@@ -84,10 +85,26 @@ class MainActivity : FragmentActivity() {
             registerReceiver(pipActionReceiver, filter)
         }
         AppLockManager.registerLifecycleObserver()
+        handleQuickActionIntent(intent)
         setContent {
             YtSaverTheme {
                 AppRoot(this)
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // "standard" launch mode means a shortcut tap while the app is already running creates a
+        // new Activity instance (onCreate runs again) rather than calling this — handled here too
+        // anyway, in case that ever changes.
+        handleQuickActionIntent(intent)
+    }
+
+    private fun handleQuickActionIntent(intent: Intent?) {
+        when (intent?.getStringExtra(EXTRA_QUICK_ACTION)) {
+            "record_audio" -> PendingQuickRecordAction.set(PendingQuickRecordAction.Action.AUDIO)
+            "record_video" -> PendingQuickRecordAction.set(PendingQuickRecordAction.Action.VIDEO)
         }
     }
 
@@ -132,6 +149,7 @@ class MainActivity : FragmentActivity() {
 
     private companion object {
         const val ACTION_PIP_PLAY_PAUSE = "com.mobicareapp.PIP_PLAY_PAUSE"
+        const val EXTRA_QUICK_ACTION = "quick_action"
     }
 }
 
@@ -145,7 +163,7 @@ private fun AppRoot(activity: FragmentActivity) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
-        requestUnrestrictedBatteryOnce(context, batteryOptimizationLauncher)
+        requestUnrestrictedBatteryIfNeeded(context, batteryOptimizationLauncher)
     }
 
     val appLocked by AppLockManager.locked.collectAsState()
@@ -157,6 +175,18 @@ private fun AppRoot(activity: FragmentActivity) {
     val navController = rememberNavController()
     var videoRequest by remember { mutableStateOf<VideoQueueRequest?>(null) }
     var playerFullscreen by remember { mutableStateOf(false) }
+    // Hoisted above "main" (rather than local to MainScaffold) so it survives that composable
+    // being torn down and rebuilt when the player/browser destinations are pushed on top of it —
+    // otherwise it always reset to tab 0 on the way back, regardless of which tab was open before
+    // a video was opened.
+    var selectedTab by remember { mutableStateOf(0) }
+    // A shortcut tap (long-press the app icon → "Record Audio"/"Record Video") sets this before
+    // this composition even starts — jump straight to the Record tab so RecordScreen's own
+    // LaunchedEffect can see it and start recording immediately, no extra taps needed.
+    val pendingQuickAction by PendingQuickRecordAction.pending.collectAsState()
+    LaunchedEffect(pendingQuickAction) {
+        if (pendingQuickAction != null) selectedTab = 3
+    }
     val isInPip by PipState.isInPip.collectAsState()
     // Derived from the back stack (rather than toggled only from onBack callbacks) so it also
     // reacts correctly to the system/gesture back button, not just this screen's own back arrow.
@@ -171,6 +201,8 @@ private fun AppRoot(activity: FragmentActivity) {
             NavHost(navController, startDestination = "main") {
                 composable("main") {
                     MainScaffold(
+                        selectedTab = selectedTab,
+                        onTabSelected = { selectedTab = it },
                         onOpenVideo = { queue, startIndex, loop ->
                             videoRequest = VideoQueueRequest(queue, startIndex, loop)
                             navController.navigate("player")
@@ -197,7 +229,13 @@ private fun AppRoot(activity: FragmentActivity) {
                             queue = request.queue,
                             startIndex = request.startIndex,
                             initialLoop = request.loop,
-                            onBack = { navController.popBackStack() },
+                            onBack = {
+                                // Wherever it was opened from, watching a video and going back
+                                // should land on Library, not silently return to whatever tab
+                                // (often Home/Save) happened to be selected beforehand.
+                                selectedTab = 1
+                                navController.popBackStack()
+                            },
                             onFullscreenChange = { fullscreen -> playerFullscreen = fullscreen }
                         )
                     }
@@ -210,33 +248,36 @@ private fun AppRoot(activity: FragmentActivity) {
 private data class VideoQueueRequest(val queue: List<SavedMedia>, val startIndex: Int, val loop: Boolean)
 
 @Composable
-private fun MainScaffold(onOpenVideo: (List<SavedMedia>, Int, Boolean) -> Unit, onOpenBrowser: (String?) -> Unit) {
-    var selectedTab by remember { mutableStateOf(0) }
-
+private fun MainScaffold(
+    selectedTab: Int,
+    onTabSelected: (Int) -> Unit,
+    onOpenVideo: (List<SavedMedia>, Int, Boolean) -> Unit,
+    onOpenBrowser: (String?) -> Unit
+) {
     Scaffold(
         bottomBar = {
             NavigationBar {
                 NavigationBarItem(
                     selected = selectedTab == 0,
-                    onClick = { selectedTab = 0 },
+                    onClick = { onTabSelected(0) },
                     icon = { Icon(Icons.Default.Add, contentDescription = "Save") },
                     label = { Text("Save") }
                 )
                 NavigationBarItem(
                     selected = selectedTab == 1,
-                    onClick = { selectedTab = 1 },
+                    onClick = { onTabSelected(1) },
                     icon = { Icon(Icons.Default.List, contentDescription = "Library") },
                     label = { Text("Library") }
                 )
                 NavigationBarItem(
                     selected = selectedTab == 2,
-                    onClick = { selectedTab = 2 },
+                    onClick = { onTabSelected(2) },
                     icon = { Icon(Icons.Default.DocumentScanner, contentDescription = "Scan") },
                     label = { Text("Scan") }
                 )
                 NavigationBarItem(
                     selected = selectedTab == 3,
-                    onClick = { selectedTab = 3 },
+                    onClick = { onTabSelected(3) },
                     icon = { Icon(Icons.Default.FiberManualRecord, contentDescription = "Record") },
                     label = { Text("Record") }
                 )
@@ -255,14 +296,13 @@ private fun MainScaffold(onOpenVideo: (List<SavedMedia>, Int, Boolean) -> Unit, 
 }
 
 /**
- * Background audio playback and multi-file downloads get killed by
- * aggressive OEM battery managers unless the app is exempted from Doze/App
- * Standby. Ask once, the first time the app is opened.
+ * Background audio playback, multi-file downloads, and especially voice-activated/always-listen
+ * recording get killed by aggressive OEM battery managers unless the app is exempted from
+ * Doze/App Standby — this is required for those features to actually survive the app being
+ * swiped away from Recents, so it asks on every launch until actually granted, not just once ever
+ * (a one-time ask that gets dismissed or missed would otherwise never come back).
  */
-private fun requestUnrestrictedBatteryOnce(context: Context, launcher: ActivityResultLauncher<Intent>) {
-    val prefs = context.getSharedPreferences("ytsaver_prefs", Context.MODE_PRIVATE)
-    if (prefs.getBoolean("asked_battery_optimization", false)) return
-
+private fun requestUnrestrictedBatteryIfNeeded(context: Context, launcher: ActivityResultLauncher<Intent>) {
     val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
     if (!powerManager.isIgnoringBatteryOptimizations(context.packageName)) {
         val intent = Intent(
@@ -271,5 +311,4 @@ private fun requestUnrestrictedBatteryOnce(context: Context, launcher: ActivityR
         )
         runCatching { launcher.launch(intent) }
     }
-    prefs.edit().putBoolean("asked_battery_optimization", true).apply()
 }

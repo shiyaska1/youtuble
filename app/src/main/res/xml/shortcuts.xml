@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="record_audio"
+        android:enabled="true"
+        android:icon="@android:drawable/presence_audio_online"
+        android:shortcutShortLabel="@string/shortcut_record_audio_short"
+        android:shortcutLongLabel="@string/shortcut_record_audio_long">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.mobicareapp"
+            android:targetClass="com.mobicareapp.MainActivity">
+            <extra android:name="quick_action" android:value="record_audio" />
+        </intent>
+    </shortcut>
+    <shortcut
+        android:shortcutId="record_video"
+        android:enabled="true"
+        android:icon="@android:drawable/presence_video_online"
+        android:shortcutShortLabel="@string/shortcut_record_video_short"
+        android:shortcutLongLabel="@string/shortcut_record_video_long">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.mobicareapp"
+            android:targetClass="com.mobicareapp.MainActivity">
+            <extra android:name="quick_action" android:value="record_video" />
+        </intent>
+    </shortcut>
+</shortcuts>

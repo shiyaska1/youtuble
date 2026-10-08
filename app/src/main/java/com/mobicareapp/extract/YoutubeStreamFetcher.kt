@@ -14,7 +14,11 @@ data class MediaOption(
     val referer: String? = null,
     // Carries a signed-in session cookie (from the shared, app-wide WebView CookieManager) for
     // sites that only serve their video to the same session that's logged in — null if none.
-    val cookie: String? = null
+    val cookie: String? = null,
+    // True for a YouTube DASH video-only stream (no audio track of its own) — the resolutions
+    // beyond what "progressive" (video+audio already combined) offers only exist this way.
+    // Downloading one of these needs muxing with a separate audio stream via ffmpeg afterward.
+    val needsAudioMux: Boolean = false
 )
 
 data class FetchedStream(
@@ -22,14 +26,20 @@ data class FetchedStream(
     val thumbnailUrl: String?,
     val durationSeconds: Long,
     val sourceUrl: String,
-    val videoOption: MediaOption?,
+    /** Highest resolution first. More than one entry only for YouTube — other sources have exactly one (or zero). */
+    val videoOptions: List<MediaOption>,
     val audioOption: MediaOption?
-)
+) {
+    /** The single best video option — what non-YouTube sources always have, and what YouTube's own "best" was before quality selection existed. */
+    val videoOption: MediaOption? get() = videoOptions.firstOrNull()
+}
 
 /**
- * Looks up a pasted YouTube link and picks the best "progressive" video
- * stream (video+audio already muxed together, so no ffmpeg is needed) and
- * the best audio-only stream.
+ * Looks up a pasted YouTube link and collects every downloadable video quality, plus the best
+ * audio-only stream. YouTube's "progressive" streams (video+audio already muxed, no ffmpeg
+ * needed) are capped at a fairly low resolution — genuinely higher quality (1080p and up) only
+ * exists as video-only DASH streams, which [MediaOption.needsAudioMux] flags so the caller knows
+ * to mux one of those with [FetchedStream.audioOption] via ffmpeg after downloading both.
  */
 object YoutubeStreamFetcher {
 
@@ -38,17 +48,20 @@ object YoutubeStreamFetcher {
             val url = rawUrl.trim()
             val info = StreamInfo.getInfo(url)
 
-            val bestVideo = info.videoStreams
+            val progressive = info.videoStreams
                 .filter { !it.url.isNullOrBlank() }
-                .maxByOrNull { resolutionRank(it.resolution) }
-                ?.let {
-                    MediaOption(
-                        streamUrl = it.url!!,
-                        fileExtension = it.format?.suffix ?: "mp4",
-                        mimeType = it.format?.mimeType ?: "video/mp4",
-                        label = it.resolution ?: "Video"
-                    )
-                }
+                .map { toVideoOption(it.url!!, it.format?.suffix, it.format?.mimeType, it.resolution, needsAudioMux = false) }
+            val videoOnly = info.videoOnlyStreams
+                .filter { !it.url.isNullOrBlank() }
+                .map { toVideoOption(it.url!!, it.format?.suffix, it.format?.mimeType, it.resolution, needsAudioMux = true) }
+
+            // One entry per distinct resolution, highest first — preferring the progressive
+            // stream at that resolution when both exist, since it needs no muxing afterward.
+            val videoOptions = (progressive + videoOnly)
+                .groupBy { resolutionRank(it.label) }
+                .toSortedMap(compareByDescending { it })
+                .values
+                .map { atThisResolution -> atThisResolution.firstOrNull { !it.needsAudioMux } ?: atThisResolution.first() }
 
             val bestAudio = info.audioStreams
                 .filter { !it.url.isNullOrBlank() }
@@ -67,11 +80,19 @@ object YoutubeStreamFetcher {
                 thumbnailUrl = info.thumbnails.maxByOrNull { it.height }?.url,
                 durationSeconds = info.duration,
                 sourceUrl = url,
-                videoOption = bestVideo,
+                videoOptions = videoOptions,
                 audioOption = bestAudio
             )
         }
     }
+
+    private fun toVideoOption(streamUrl: String, suffix: String?, mimeType: String?, resolution: String?, needsAudioMux: Boolean) = MediaOption(
+        streamUrl = streamUrl,
+        fileExtension = suffix ?: "mp4",
+        mimeType = mimeType ?: "video/mp4",
+        label = resolution ?: "Video",
+        needsAudioMux = needsAudioMux
+    )
 
     private fun resolutionRank(resolution: String?): Int =
         resolution?.takeWhile { it.isDigit() }?.toIntOrNull() ?: 0

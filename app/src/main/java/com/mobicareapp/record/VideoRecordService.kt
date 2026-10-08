@@ -18,6 +18,7 @@ import android.os.IBinder
 import android.os.ParcelFileDescriptor
 import android.os.PowerManager
 import android.view.Surface
+import android.view.WindowManager
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.mobicareapp.MainActivity
@@ -55,6 +56,11 @@ class VideoRecordService : Service() {
     private var sessionGeneration = 0
     /** Set once at Start, reused at Stop so the file and its Library entry always agree on when the recording began. */
     private var pendingCaption: String? = null
+    private var currentQuality: VideoQuality = VideoQuality.NORMAL
+    /** Shared across every segment of one continuous recording, so a long session's parts are recognizable as belonging together (e.g. "VID_..._part2") rather than looking like unrelated clips. */
+    private var sessionBaseName: String? = null
+    private var segmentIndex = 1
+    private var rotationRunnable: Runnable? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -65,23 +71,58 @@ class VideoRecordService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         latestStartId = startId
-        if (intent?.action == ACTION_STOP) stopRecording() else beginRecording()
+        if (intent?.action == ACTION_STOP) {
+            stopRecording()
+        } else {
+            val quality = intent?.getStringExtra(EXTRA_QUALITY)?.let { runCatching { VideoQuality.valueOf(it) }.getOrNull() }
+                ?: VideoQuality.NORMAL
+            beginRecording(quality, isNewSession = true)
+        }
         return START_NOT_STICKY
     }
 
-    private fun beginRecording() {
+    /**
+     * [isNewSession] true is a genuine Start tap: claims the foreground/wake lock/RecordingStatus
+     * and picks a fresh session name. false is an automatic mid-recording rotation (see
+     * [rotateSegment]) — the service is already foreground and already "active" from the user's
+     * perspective, so none of that is touched again, just a new file/camera/recorder for the next
+     * segment.
+     */
+    private fun beginRecording(quality: VideoQuality, isNewSession: Boolean) {
         if (recorder != null) return
         try {
-            startForeground(NOTIFICATION_ID, buildNotification())
+            currentQuality = quality
+            if (isNewSession) {
+                startForeground(NOTIFICATION_ID, buildNotification())
+                sessionBaseName = RecordFileStore.timestampedName(MediaType.VIDEO)
+                segmentIndex = 1
+            }
 
-            // Captured once, here, and reused for both the on-disk file and the eventual Library
-            // caption/fileName — generating it again at Stop time meant the two could disagree
-            // (the file named for when recording started, the caption for whenever Stop happened
-            // to be tapped, which could be minutes later).
-            val caption = RecordFileStore.timestampedName(MediaType.VIDEO)
+            // Captured once per segment, and reused when that segment finishes — generating it
+            // again at stop time meant the file and its Library caption could disagree (the file
+            // named for when the segment started, the caption for whenever it ended).
+            val base = sessionBaseName ?: RecordFileStore.timestampedName(MediaType.VIDEO).also { sessionBaseName = it }
+            val caption = if (segmentIndex == 1) base else "${base}_part$segmentIndex"
             pendingCaption = caption
             val newTarget = RecordFileStore.createTarget(this, MediaType.VIDEO, caption)
             target = newTarget
+
+            // Camera2 always delivers frames in the sensor's own native (landscape) orientation —
+            // the pixel buffer itself never changes shape based on how the phone is held. Without
+            // an explicit rotation hint here, MediaRecorder writes that raw landscape buffer with
+            // no rotation metadata at all, so playback always shows landscape even when the phone
+            // was held upright. The hint is what tells a player "display this rotated" instead.
+            val cameraManager = getSystemService(CAMERA_SERVICE) as CameraManager
+            val cameraId = backCameraId(cameraManager) ?: throw IllegalStateException("No camera available")
+            val characteristics = cameraManager.getCameraCharacteristics(cameraId)
+            val sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
+            val isFrontFacing = characteristics.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_FRONT
+            val deviceRotationDegrees = currentDisplayRotationDegrees()
+            val orientationHint = if (isFrontFacing) {
+                (sensorOrientation + deviceRotationDegrees + 360) % 360
+            } else {
+                (sensorOrientation - deviceRotationDegrees + 360) % 360
+            }
 
             val newRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) MediaRecorder(this) else @Suppress("DEPRECATION") MediaRecorder()
             // CAMCORDER assumes the audio HAL can tie itself to a camera the MediaRecorder itself
@@ -97,9 +138,10 @@ class VideoRecordService : Service() {
             newRecorder.setAudioChannels(1)
             newRecorder.setAudioSamplingRate(44_100)
             newRecorder.setAudioEncodingBitRate(96_000)
-            newRecorder.setVideoSize(VIDEO_WIDTH, VIDEO_HEIGHT)
+            newRecorder.setVideoSize(quality.width, quality.height)
             newRecorder.setVideoFrameRate(30)
-            newRecorder.setVideoEncodingBitRate(8_000_000)
+            newRecorder.setVideoEncodingBitRate(quality.bitrateBps)
+            newRecorder.setOrientationHint(orientationHint)
             outputPfd = RecordFileStore.setOutput(newRecorder, this, newTarget)
             newRecorder.prepare()
             recorder = newRecorder
@@ -108,9 +150,6 @@ class VideoRecordService : Service() {
             cameraThread = thread
             val handler = Handler(thread.looper)
             cameraHandler = handler
-
-            val cameraManager = getSystemService(CAMERA_SERVICE) as CameraManager
-            val cameraId = backCameraId(cameraManager) ?: throw IllegalStateException("No camera available")
 
             @Suppress("MissingPermission")
             cameraManager.openCamera(cameraId, object : CameraDevice.StateCallback() {
@@ -136,12 +175,38 @@ class VideoRecordService : Service() {
                 }
             }, handler)
 
-            wakeLock = RecordFileStore.acquireWakeLock(this, "ytsaver:video-record")
-            RecordingStatus.started(MediaType.VIDEO, RecordingSource.CAMERA)
+            if (isNewSession) {
+                wakeLock = RecordFileStore.acquireWakeLock(this, "ytsaver:video-record")
+                RecordingStatus.started(MediaType.VIDEO, RecordingSource.CAMERA)
+            }
         } catch (e: Exception) {
             RecordingStatus.reportError(e.message ?: "Couldn't start video recording")
             cleanupAfterFailure()
         }
+    }
+
+    /**
+     * MediaRecorder only writes a playable file's final index (the MP4 "moov" atom) once stop()
+     * completes cleanly — if the app/phone dies mid-recording before that, the file is unplayable
+     * even though the raw video data was written the whole time. Rather than trying to make one
+     * MediaRecorder session safe against that (Android's APIs don't offer incremental finalizing),
+     * this periodically finishes the current segment as a complete, valid file and immediately
+     * starts a new one for the next stretch — so a crash mid-recording only costs the
+     * currently-in-progress segment, not everything recorded before it.
+     */
+    private fun scheduleSegmentRotation() {
+        val handler = cameraHandler ?: return
+        val runnable = Runnable { rotateSegment() }
+        rotationRunnable = runnable
+        handler.postDelayed(runnable, SEGMENT_DURATION_MS)
+    }
+
+    private fun rotateSegment() {
+        if (recorder == null) return // Already stopped for real by the time this fired.
+        val result = stopCurrentSegment()
+        segmentIndex++
+        serviceScope.launch { saveSegment(result, reportShortRecordingError = false) }
+        beginRecording(currentQuality, isNewSession = false)
     }
 
     /**
@@ -180,6 +245,7 @@ class VideoRecordService : Service() {
                         if (!recorderStarted) {
                             activeRecorder.start()
                             recorderStarted = true
+                            scheduleSegmentRotation()
                         }
                     } catch (e: Exception) {
                         onSessionFailure(e.message ?: "Couldn't start camera session")
@@ -208,7 +274,7 @@ class VideoRecordService : Service() {
     }
 
     private fun setPreview(surfaceTexture: SurfaceTexture) {
-        surfaceTexture.setDefaultBufferSize(VIDEO_WIDTH, VIDEO_HEIGHT)
+        surfaceTexture.setDefaultBufferSize(currentQuality.width, currentQuality.height)
         runCatching { previewSurface?.release() }
         previewSurface = Surface(surfaceTexture)
         configureSession()
@@ -224,6 +290,23 @@ class VideoRecordService : Service() {
         runCatching { old.release() }
     }
 
+    /**
+     * This service has no Activity/Window of its own to ask (Context.display isn't available from
+     * a bare Service on API 30+), but WindowManager.getDefaultDisplay() still works from any
+     * Context and reflects whichever way the device is currently held — which is what actually
+     * determines the correct recording orientation, not a fixed assumption.
+     */
+    private fun currentDisplayRotationDegrees(): Int {
+        val windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+        @Suppress("DEPRECATION")
+        return when (windowManager.defaultDisplay.rotation) {
+            Surface.ROTATION_90 -> 90
+            Surface.ROTATION_180 -> 180
+            Surface.ROTATION_270 -> 270
+            else -> 0
+        }
+    }
+
     private fun backCameraId(manager: CameraManager): String? {
         val ids = manager.cameraIdList
         return ids.firstOrNull { id ->
@@ -231,7 +314,16 @@ class VideoRecordService : Service() {
         } ?: ids.firstOrNull()
     }
 
-    private fun stopRecording() {
+    private data class SegmentResult(val target: RecordTarget?, val caption: String?, val stoppedCleanly: Boolean)
+
+    /**
+     * Tears down the current MediaRecorder/camera session and returns what it produced — shared by
+     * a real user Stop and an automatic [rotateSegment] rotation. Deliberately doesn't touch
+     * RecordingStatus, the wake lock, or the foreground/service lifecycle: those mean different
+     * things depending on which caller this is (a rotation keeps all of that going for the next
+     * segment; a real stop ends it), so each caller handles those itself.
+     */
+    private fun stopCurrentSegment(): SegmentResult {
         val finishedTarget = target
         val finishedCaption = pendingCaption
         target = null
@@ -261,6 +353,29 @@ class VideoRecordService : Service() {
         cameraHandler = null
         runCatching { previewSurface?.release() }
         previewSurface = null
+
+        return SegmentResult(finishedTarget, finishedCaption, stoppedCleanly)
+    }
+
+    /** A plain suspend function (not itself launching a coroutine) so a caller already inside a coroutine — [stopRecording] in particular — actually waits for the save to finish before doing anything that follows it, like stopSelf(). */
+    private suspend fun saveSegment(result: SegmentResult, reportShortRecordingError: Boolean) {
+        val target = result.target ?: return
+        if (result.stoppedCleanly) {
+            RecordFileStore.finalizeAndSave(
+                applicationContext, target, MediaType.VIDEO,
+                result.caption ?: RecordFileStore.timestampedName(MediaType.VIDEO),
+                categoryName = "Manual Video"
+            )
+        } else {
+            RecordFileStore.abandon(applicationContext, target)
+            if (reportShortRecordingError) RecordingStatus.reportError("Recording was too short to save")
+        }
+    }
+
+    private fun stopRecording() {
+        rotationRunnable?.let { cameraHandler?.removeCallbacks(it) }
+        rotationRunnable = null
+        val result = stopCurrentSegment()
         releaseWakeLock()
         RecordingStatus.stopped()
 
@@ -269,24 +384,14 @@ class VideoRecordService : Service() {
         // that work let Android destroy the service (cancelling serviceScope, via onDestroy) before
         // it finished, which is exactly why a recording would only sometimes fail to save.
         serviceScope.launch {
-            if (finishedTarget != null) {
-                if (stoppedCleanly) {
-                    RecordFileStore.finalizeAndSave(
-                        applicationContext, finishedTarget, MediaType.VIDEO,
-                        finishedCaption ?: RecordFileStore.timestampedName(MediaType.VIDEO),
-                        categoryName = "Manual Video"
-                    )
-                } else {
-                    RecordFileStore.abandon(applicationContext, finishedTarget)
-                    RecordingStatus.reportError("Recording was too short to save")
-                }
-            }
+            saveSegment(result, reportShortRecordingError = true)
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf(latestStartId)
         }
     }
 
     private fun cleanupAfterFailure() {
+        rotationRunnable = null
         target?.let { RecordFileStore.abandon(this, it) }
         target = null
         pendingCaption = null
@@ -343,8 +448,11 @@ class VideoRecordService : Service() {
     companion object {
         private const val NOTIFICATION_ID = 52
         private const val ACTION_STOP = "com.mobicareapp.record.STOP_VIDEO"
-        private const val VIDEO_WIDTH = 1280
-        private const val VIDEO_HEIGHT = 720
+        private const val EXTRA_QUALITY = "quality"
+        // 5 minutes — short enough that a crash mid-recording never costs much (and that it's
+        // actually observable within a normal test recording, not just in theory), while still not
+        // fragmenting a long session into an unwieldy number of files.
+        const val SEGMENT_DURATION_MS = 5 * 60 * 1000L
 
         /**
          * The running service, so the Record screen can hand it a preview surface while the app is
@@ -354,8 +462,9 @@ class VideoRecordService : Service() {
         @Volatile
         private var instance: VideoRecordService? = null
 
-        fun start(context: Context) {
-            ContextCompat.startForegroundService(context, Intent(context, VideoRecordService::class.java))
+        fun start(context: Context, quality: VideoQuality = VideoQuality.NORMAL) {
+            val intent = Intent(context, VideoRecordService::class.java).putExtra(EXTRA_QUALITY, quality.name)
+            ContextCompat.startForegroundService(context, intent)
         }
 
         fun stop(context: Context) {

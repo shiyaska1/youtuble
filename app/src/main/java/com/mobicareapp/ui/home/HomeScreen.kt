@@ -12,11 +12,13 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Public
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
@@ -26,6 +28,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -40,7 +43,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
-import com.mobicareapp.data.MediaType
+import com.mobicareapp.extract.MediaOption
 import com.mobicareapp.ui.browser.SignInWebViewDialog
 
 @Composable
@@ -48,6 +51,7 @@ fun HomeScreen(viewModel: HomeViewModel = viewModel(), onOpenBrowser: (String?) 
     val state by viewModel.uiState.collectAsState()
     val progress by viewModel.downloadProgress.collectAsState()
     val queuedDownloads by viewModel.queuedDownloads.collectAsState()
+    val muxingIds by viewModel.muxingIds.collectAsState()
 
     Column(modifier = Modifier.fillMaxSize()) {
         Column(
@@ -121,9 +125,11 @@ fun HomeScreen(viewModel: HomeViewModel = viewModel(), onOpenBrowser: (String?) 
             items(state.queue, key = { it.id }) { queued ->
                 QueueItemCard(
                     queued = queued,
+                    isMuxing = queued.id in muxingIds,
                     onCaptionChanged = { viewModel.onCaptionChanged(queued.id, it) },
                     onRemove = { viewModel.removeFromQueue(queued.id) },
-                    onSave = { type -> viewModel.saveAs(queued.id, type) },
+                    onSaveVideo = { option -> viewModel.saveVideo(queued.id, option) },
+                    onSaveAudio = { viewModel.saveAudio(queued.id) },
                     onRetry = { viewModel.retry(queued.id) },
                     onOpenInBrowse = { onOpenBrowser(normalizeUrlForSignIn(queued.urlText)) }
                 )
@@ -135,9 +141,11 @@ fun HomeScreen(viewModel: HomeViewModel = viewModel(), onOpenBrowser: (String?) 
 @Composable
 private fun QueueItemCard(
     queued: QueuedLink,
+    isMuxing: Boolean,
     onCaptionChanged: (String) -> Unit,
     onRemove: () -> Unit,
-    onSave: (MediaType) -> Unit,
+    onSaveVideo: (MediaOption) -> Unit,
+    onSaveAudio: () -> Unit,
     onRetry: () -> Unit,
     onOpenInBrowse: () -> Unit
 ) {
@@ -206,26 +214,82 @@ private fun QueueItemCard(
                         IconButton(onClick = onRemove) { Icon(Icons.Default.Close, contentDescription = "Remove") }
                     }
 
+                    var showQualityPicker by remember { mutableStateOf(false) }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(
-                            onClick = { onSave(MediaType.VIDEO) },
-                            enabled = status.stream.videoOption != null,
+                            onClick = { showQualityPicker = true },
+                            enabled = status.stream.videoOptions.isNotEmpty() && !isMuxing,
                             modifier = Modifier.weight(1f)
                         ) {
-                            Text(status.stream.videoOption?.let { "Save Video (${it.label})" } ?: "No video stream")
+                            if (isMuxing) {
+                                CircularProgressIndicator(modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Merging…")
+                            } else {
+                                Text(
+                                    status.stream.videoOptions.firstOrNull()?.let { "Save Video (${it.label})" }
+                                        ?: "No video stream"
+                                )
+                            }
                         }
                         OutlinedButton(
-                            onClick = { onSave(MediaType.AUDIO) },
-                            enabled = status.stream.audioOption != null,
+                            onClick = onSaveAudio,
+                            enabled = status.stream.audioOption != null && !isMuxing,
                             modifier = Modifier.weight(1f)
                         ) {
                             Text(status.stream.audioOption?.let { "Save Audio (${it.label})" } ?: "No audio stream")
                         }
                     }
+                    if (showQualityPicker) {
+                        VideoQualityPickerDialog(
+                            options = status.stream.videoOptions,
+                            onPick = { option ->
+                                showQualityPicker = false
+                                onSaveVideo(option)
+                            },
+                            onDismiss = { showQualityPicker = false }
+                        )
+                    }
                 }
             }
         }
     }
+}
+
+@Composable
+private fun VideoQualityPickerDialog(
+    options: List<MediaOption>,
+    onPick: (MediaOption) -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Choose quality") },
+        text = {
+            Column {
+                options.forEach { option ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .selectable(selected = false, onClick = { onPick(option) })
+                            .padding(vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(selected = false, onClick = { onPick(option) })
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            // A DASH video-only stream needs a separate audio download merged in
+                            // afterward — flagged here so the wait for "Merging…" isn't a surprise.
+                            if (option.needsAudioMux) "${option.label} (merges audio, slower)" else option.label
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
 }
 
 private fun normalizeUrlForSignIn(input: String): String {

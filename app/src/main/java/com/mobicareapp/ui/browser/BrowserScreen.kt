@@ -4,14 +4,18 @@ import android.annotation.SuppressLint
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -24,6 +28,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
@@ -35,6 +40,7 @@ import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -76,8 +82,11 @@ import com.mobicareapp.extract.BROWSER_USER_AGENT
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 import java.net.URLDecoder
 import java.util.concurrent.TimeUnit
 
@@ -97,6 +106,16 @@ private data class DetectedMedia(
 // ordered segment list by HlsResolver when downloaded.
 private val VIDEO_EXTENSIONS = setOf("mp4", "webm", "mkv", "mov", "3gp")
 private val AUDIO_EXTENSIONS = setOf("mp3", "m4a", "aac", "wav", "ogg")
+
+// YouTube and Facebook are deliberately left off this list — both hide their actual video behind
+// encrypted/DASH streams or signed, obfuscated URLs that Browse's request-sniffing approach can't
+// reliably catch, so a quick-access shortcut to them here just invites trying something that won't
+// work. YouTube already has its own proper downloader on the Home screen (paste the link there
+// instead); Facebook has no equivalent yet, so its only route is pasting the link into Browse
+// directly, same as any other site.
+private val QUICK_LINKS = listOf(
+    "Instagram" to "https://www.instagram.com"
+)
 
 private val probeClient = OkHttpClient.Builder()
     .connectTimeout(8, TimeUnit.SECONDS)
@@ -121,6 +140,12 @@ private object BrowserSession {
     val sizes = mutableStateMapOf<String, Long?>()
     val hlsSegmentCounts = mutableStateMapOf<String, Int?>()
     val currentPageUrl = java.util.concurrent.atomic.AtomicReference<String?>(null)
+    // Temporary diagnostic — counts every request shouldInterceptRequest actually sees, regardless
+    // of whether it matched a video/audio extension. Media detection reportedly stopped working
+    // entirely (even on a plain direct video file), and this is the quickest way to tell apart
+    // "the WebView isn't handing us requests at all anymore" from "it is, but nothing matches" —
+    // the fix is very different depending on which one it turns out to be.
+    var requestsSeen by mutableStateOf(0)
 }
 
 /**
@@ -161,6 +186,14 @@ fun BrowserScreen(
     val hlsSegmentCounts = BrowserSession.hlsSegmentCounts
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
     val currentPageUrl = BrowserSession.currentPageUrl
+    // currentPageUrl only updates on a full page navigation (WebViewClient.onPageStarted) — a
+    // site that changes "page" via JS history.pushState instead of a real navigation (mobile
+    // YouTube switching between videos without reloading is exactly this) never fires that, so
+    // it goes stale and "Copy page link" would keep copying whichever video was open first.
+    // WebView.getUrl() itself doesn't have that problem — it always reflects the live document
+    // location — and reading it here (a Compose click handler) is on the main thread, same as
+    // the property itself requires.
+    var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var popupWebView by remember { mutableStateOf<WebView?>(null) }
     var desktopMode by BrowserSession::desktopMode
     val progress by DownloadService.progress.collectAsState()
@@ -191,7 +224,9 @@ fun BrowserScreen(
                 },
                 actions = {
                     IconButton(onClick = {
-                        val link = currentPageUrl.get()?.takeIf { it.isNotBlank() } ?: addressText
+                        val link = webViewRef?.url?.takeIf { it.isNotBlank() }
+                            ?: currentPageUrl.get()?.takeIf { it.isNotBlank() }
+                            ?: addressText
                         if (link.isNotBlank()) {
                             val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                             clipboard.setPrimaryClip(ClipData.newPlainText("Page link", link))
@@ -212,6 +247,49 @@ fun BrowserScreen(
         }
     ) { padding ->
         Column(modifier = Modifier.fillMaxSize().padding(padding)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 4.dp)
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                QUICK_LINKS.forEach { (label, url) ->
+                    AssistChip(
+                        onClick = {
+                            addressText = url
+                            pendingUrl = url
+                        },
+                        label = { Text(label) }
+                    )
+                }
+                // Some sites still detect and block even a WebView disguised as real Chrome (or
+                // behave subtly differently) — this hands the current page straight to the actual
+                // Chrome app, which already has whatever login session the user has there.
+                // There's no way to pull that session into this embedded WebView instead (Android
+                // keeps every app's cookies in its own private, sandboxed storage — even this app
+                // can't read Chrome's), so this is the practical equivalent: use real Chrome itself
+                // for a page rather than trying to borrow its login state.
+                AssistChip(
+                    onClick = {
+                        val target = webViewRef?.url?.takeIf { it.isNotBlank() }
+                            ?: currentPageUrl.get()?.takeIf { it.isNotBlank() }
+                            ?: addressText.takeIf { it.isNotBlank() }
+                            ?: QUICK_LINKS.first().second
+                        openInSystemChrome(context, target)
+                    },
+                    label = { Text("Open in Chrome") }
+                )
+            }
+
+            // Temporary diagnostic line — see the comment on BrowserSession.requestsSeen.
+            Text(
+                "Requests seen: ${BrowserSession.requestsSeen}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 12.dp)
+            )
+
             progress?.let { p ->
                 Card(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
                     Column(modifier = Modifier.padding(12.dp)) {
@@ -348,7 +426,14 @@ fun BrowserScreen(
                             onPopupRequested = { popupWebView = it },
                             onPopupClosed = { popupWebView = null }
                         )
+                        addJavascriptInterface(
+                            VideoSrcBridge { src ->
+                                probeAndAddMedia(src, currentPageUrl.get(), mainHandler, detected)
+                            },
+                            "YtSaverBridge"
+                        )
                         startAutoSkipAdsLoop(this, mainHandler)
+                        webViewRef = this
                         // Leaving Browse (back button, opening Library, etc.) disposes this whole
                         // composable, so a fresh WebView is created next time it's opened — reload
                         // whatever page was open before instead of starting blank every time.
@@ -479,10 +564,43 @@ private const val AUTO_SKIP_AD_SCRIPT = """
 """
 private const val AUTO_SKIP_AD_INTERVAL_MS = 1500L
 
+// Sites like desimaal.live fetch the real video URL from an encrypted API and assign it to
+// <video>.src in JS, and that URL is often a signed/CDN link with no .mp4 extension at all, so the
+// extension-based sniffing in classifyMediaUrl never matches it. The <video> element itself always
+// knows what it's playing, so ask it directly. blob: URLs (MSE players) can't be fetched from
+// outside the page and are skipped.
+private const val REPORT_VIDEO_SRC_SCRIPT = """
+(function() {
+  try {
+    var vids = document.getElementsByTagName('video');
+    for (var i = 0; i < vids.length; i++) {
+      var v = vids[i];
+      var srcs = [v.currentSrc, v.src];
+      var sources = v.getElementsByTagName('source');
+      for (var j = 0; j < sources.length; j++) srcs.push(sources[j].src);
+      for (var k = 0; k < srcs.length; k++) {
+        var u = srcs[k];
+        if (u && /^https?:/i.test(u)) {
+          YtSaverBridge.reportVideo(u);
+        }
+      }
+    }
+  } catch (e) {}
+})();
+"""
+
+private class VideoSrcBridge(private val onVideoSrc: (String) -> Unit) {
+    @JavascriptInterface
+    fun reportVideo(url: String?) {
+        if (!url.isNullOrBlank() && url.startsWith("http", ignoreCase = true)) onVideoSrc(url)
+    }
+}
+
 private fun startAutoSkipAdsLoop(webView: WebView, handler: Handler) {
     val runnable = object : Runnable {
         override fun run() {
             runCatching { webView.evaluateJavascript(AUTO_SKIP_AD_SCRIPT, null) }
+            runCatching { webView.evaluateJavascript(REPORT_VIDEO_SRC_SCRIPT, null) }
             handler.postDelayed(this, AUTO_SKIP_AD_INTERVAL_MS)
         }
     }
@@ -512,17 +630,81 @@ private fun mediaSniffingWebViewClient(
         // request's own Referer header (set by the browser engine per w3c referrer-policy rules)
         // already reflects whichever document actually issued it, iframe or not, so prefer that
         // over our own tracking whenever it's present.
+        mainHandler.post { BrowserSession.requestsSeen++ }
         val referer = request.requestHeaders.entries
             .firstOrNull { it.key.equals("Referer", ignoreCase = true) }
             ?.value
             ?: currentPageUrl.get()
-        classifyMediaUrl(request.url.toString(), referer)?.let { media ->
+        val classified = classifyMediaUrl(request.url.toString(), referer)
+        if (classified != null) {
             mainHandler.post {
-                if (detected.none { mediaContentKey(it.url) == mediaContentKey(media.url) }) detected.add(media)
+                if (detected.none { mediaContentKey(it.url) == mediaContentKey(classified.url) }) detected.add(classified)
             }
+        } else if (request.method == "GET" &&
+            request.requestHeaders.keys.any { it.equals("Range", ignoreCase = true) }
+        ) {
+            // A <video>/<audio> element always asks for "Range: bytes=0-", and many CDNs serve the
+            // file from a path with no extension — the Content-Type is the only giveaway.
+            probeAndAddMedia(request.url.toString(), referer, mainHandler, detected)
         }
         return super.shouldInterceptRequest(view, request)
     }
+}
+
+private val probedMediaKeys: MutableSet<String> =
+    java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap())
+
+/**
+ * For URLs whose path says nothing about the format: fetch the first byte and decide from the
+ * response Content-Type whether it's really video/audio/HLS, adding it to [detected] if so.
+ */
+private fun probeAndAddMedia(
+    url: String,
+    referer: String?,
+    mainHandler: Handler,
+    detected: androidx.compose.runtime.snapshots.SnapshotStateList<DetectedMedia>
+) {
+    val key = mediaContentKey(url)
+    if (!url.startsWith("http", ignoreCase = true) || !probedMediaKeys.add(key)) return
+    val cookie = CookieManager.getInstance().getCookie(url)
+    val request = runCatching {
+        Request.Builder().url(url).header("Range", "bytes=0-0").apply {
+            if (!cookie.isNullOrBlank()) header("Cookie", cookie)
+            if (!referer.isNullOrBlank()) header("Referer", referer)
+        }.build()
+    }.getOrNull() ?: return
+    probeClient.newCall(request).enqueue(object : Callback {
+        override fun onFailure(call: Call, e: java.io.IOException) {
+            probedMediaKeys.remove(key)
+        }
+
+        override fun onResponse(call: Call, response: Response) {
+            response.use {
+                val contentType = it.header("Content-Type")?.substringBefore(';')?.trim()?.lowercase().orEmpty()
+                val media = when {
+                    contentType.contains("mpegurl") ->
+                        DetectedMedia(url, MediaType.VIDEO, "ts", "video/mp2t", referer, isHls = true)
+                    contentType.startsWith("video/") ->
+                        DetectedMedia(url, MediaType.VIDEO, extensionForMime(contentType), contentType, referer)
+                    contentType.startsWith("audio/") ->
+                        DetectedMedia(url, MediaType.AUDIO, extensionForMime(contentType), contentType, referer)
+                    else -> null
+                } ?: return
+                mainHandler.post {
+                    if (detected.none { d -> mediaContentKey(d.url) == key }) detected.add(media)
+                }
+            }
+        }
+    })
+}
+
+private fun extensionForMime(mime: String): String = when (mime.substringAfter('/')) {
+    "quicktime" -> "mov"
+    "x-matroska" -> "mkv"
+    "mpeg" -> if (mime.startsWith("audio/")) "mp3" else "mpg"
+    "mp4a-latm", "x-m4a" -> "m4a"
+    "x-wav" -> "wav"
+    else -> mime.substringAfter('/').removePrefix("x-").ifBlank { "mp4" }
 }
 
 /** A quiet best-effort HEAD probe just to learn file size — failures are fine, the row just shows no size. */
@@ -552,6 +734,14 @@ private fun normalizeUrl(input: String): String {
     return if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) trimmed else "https://$trimmed"
 }
 
+/** Opens [url] in the real Chrome app if it's installed, falling back to whatever the device's default browser is otherwise. */
+private fun openInSystemChrome(context: Context, url: String) {
+    val normalized = normalizeUrl(url)
+    val chromeIntent = Intent(Intent.ACTION_VIEW, Uri.parse(normalized)).setPackage("com.android.chrome")
+    runCatching { context.startActivity(chromeIntent) }
+        .onFailure { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(normalized))) }
+}
+
 /**
  * The same underlying video is sometimes caught twice under two different-looking URLs that only
  * differ in per-request signed-token query parameters. Comparing on the path instead of the full
@@ -562,10 +752,28 @@ private fun mediaContentKey(url: String): String = url.substringBefore('?')
 private fun classifyMediaUrl(url: String, pageUrl: String?): DetectedMedia? {
     val path = url.substringBefore('?').substringAfterLast('/')
     val extension = path.substringAfterLast('.', "").lowercase()
-    return when (extension) {
+    val byExtension = when (extension) {
         "m3u8" -> DetectedMedia(url, MediaType.VIDEO, "ts", "video/mp2t", pageUrl, isHls = true)
         in VIDEO_EXTENSIONS -> DetectedMedia(url, MediaType.VIDEO, extension, "video/$extension", pageUrl)
         in AUDIO_EXTENSIONS -> DetectedMedia(url, MediaType.AUDIO, extension, if (extension == "mp3") "audio/mpeg" else "audio/$extension", pageUrl)
+        else -> null
+    }
+    return byExtension ?: classifyByMimeQueryParam(url, pageUrl)
+}
+
+/**
+ * Some CDNs (YouTube's googlevideo.com among the biggest) serve the actual video/audio from a
+ * path with no file extension at all — just "/videoplayback" — and identify the format only
+ * through a "mime" query parameter instead. The plain extension check above never matches these,
+ * which is exactly why detection could see plenty of requests on a page like that and still
+ * classify none of them as media.
+ */
+private fun classifyByMimeQueryParam(url: String, pageUrl: String?): DetectedMedia? {
+    val mime = runCatching { Uri.parse(url).getQueryParameter("mime") }.getOrNull()?.lowercase() ?: return null
+    val subtype = mime.substringAfter('/', "").ifBlank { return null }
+    return when {
+        mime.startsWith("video/") -> DetectedMedia(url, MediaType.VIDEO, subtype, mime, pageUrl)
+        mime.startsWith("audio/") -> DetectedMedia(url, MediaType.AUDIO, subtype, mime, pageUrl)
         else -> null
     }
 }

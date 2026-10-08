@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.mobicareapp.data.MediaType
 import com.mobicareapp.download.DownloadService
+import com.mobicareapp.download.HighQualityMuxDownloader
 import com.mobicareapp.extract.DirectLinkFetcher
 import com.mobicareapp.extract.FetchedStream
 import com.mobicareapp.extract.GenericVideoFetcher
@@ -49,6 +50,10 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     val queuedDownloads = DownloadService.queueSize
 
     private val nextId = AtomicLong(0)
+
+    private val _muxingIds = MutableStateFlow<Set<Long>>(emptySet())
+    /** Links currently downloading+merging a high-quality video — that path has no byte-progress reporting like DownloadService's queue does, just a "this is happening" indicator. */
+    val muxingIds: StateFlow<Set<Long>> = _muxingIds.asStateFlow()
 
     fun onUrlChanged(value: String) {
         _uiState.update { it.copy(urlText = value) }
@@ -109,12 +114,49 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { it.copy(queue = it.queue.filterNot { q -> q.id == id }) }
     }
 
-    fun saveAs(id: Long, type: MediaType) {
+    fun saveAudio(id: Long) {
         val item = _uiState.value.queue.find { it.id == id } ?: return
         val status = item.status as? QueueStatus.Ready ?: return
-        val option: MediaOption = (if (type == MediaType.VIDEO) status.stream.videoOption else status.stream.audioOption)
-            ?: return
+        val option = status.stream.audioOption ?: return
+        startDownload(status, option, MediaType.AUDIO)
+        removeFromQueue(id)
+    }
 
+    /** [option] is one entry from [FetchedStream.videoOptions] the user picked from the quality dialog — not necessarily the best/first one. */
+    fun saveVideo(id: Long, option: MediaOption) {
+        val item = _uiState.value.queue.find { it.id == id } ?: return
+        val status = item.status as? QueueStatus.Ready ?: return
+
+        if (!option.needsAudioMux) {
+            startDownload(status, option, MediaType.VIDEO)
+            removeFromQueue(id)
+            return
+        }
+
+        // Above what "progressive" streams offer: video and audio are two separate downloads
+        // that need muxing together afterward, which DownloadService's single-URL queue can't do
+        // — handled here instead, with just a "this is happening" flag rather than the byte-level
+        // progress the normal queue shows.
+        val audioOption = status.stream.audioOption ?: return
+        _muxingIds.update { it + id }
+        viewModelScope.launch {
+            val result = HighQualityMuxDownloader.downloadAndMux(
+                context = getApplication(),
+                videoOption = option,
+                audioOption = audioOption,
+                caption = status.caption.ifBlank { status.stream.title },
+                sourceUrl = status.stream.sourceUrl,
+                thumbnailUrl = status.stream.thumbnailUrl,
+                durationSeconds = status.stream.durationSeconds
+            )
+            _muxingIds.update { it - id }
+            result
+                .onSuccess { removeFromQueue(id) }
+                .onFailure { e -> updateQueueItem(id) { QueueStatus.Error(e.message ?: "Couldn't download that quality") } }
+        }
+    }
+
+    private fun startDownload(status: QueueStatus.Ready, option: MediaOption, type: MediaType) {
         DownloadService.start(
             context = getApplication(),
             caption = status.caption.ifBlank { status.stream.title },
@@ -128,7 +170,6 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             cookie = option.cookie,
             referer = option.referer
         )
-        removeFromQueue(id)
     }
 
     fun dismissProgress() {

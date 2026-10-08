@@ -1,0 +1,352 @@
+package com.mobicareapp.ui.clipboard
+
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material3.Button
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import coil.compose.AsyncImage
+import com.mobicareapp.upload.ImageCombiner
+import com.mobicareapp.upload.PersonalServerSettings
+import com.mobicareapp.upload.PersonalServerUploader
+import kotlinx.coroutines.launch
+
+/**
+ * Standalone image/video-to-clipboard tool — no recording or transcription involved. Pick one or
+ * more photos/videos from the gallery and copy them to the system clipboard as one unit, so they
+ * can be pasted wherever the clipboard is actually read from next (another app on this phone, or
+ * forwarded on by a remote-desktop app's clipboard sync, if the one being used supports images —
+ * plain text-only clipboard sync tools won't carry an image across to another device).
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ImageClipboardDialog(onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var attachments by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    var copied by remember { mutableStateOf(false) }
+
+    var showServerSettings by remember { mutableStateOf(!PersonalServerSettings.isConfigured(context)) }
+    var serverUrl by remember { mutableStateOf(PersonalServerSettings.getUploadUrl(context) ?: "") }
+    var serverSecret by remember { mutableStateOf(PersonalServerSettings.getSecret(context)) }
+    var uploading by remember { mutableStateOf(false) }
+    var uploadStatus by remember { mutableStateOf<String?>(null) }
+    var noteText by remember { mutableStateOf("") }
+
+    val mediaPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickMultipleVisualMedia()
+    ) { uris ->
+        attachments = attachments + uris
+        copied = false
+    }
+
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = { Text("Copy images/videos") },
+                    navigationIcon = {
+                        IconButton(onClick = onDismiss) { Icon(Icons.Default.Close, contentDescription = "Close") }
+                    }
+                )
+            }
+        ) { padding ->
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    "Pick photos or videos, then copy them to the clipboard to paste elsewhere.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    textAlign = TextAlign.Center
+                )
+                Spacer(Modifier.height(16.dp))
+                OutlinedButton(
+                    onClick = { mediaPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)) },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(if (attachments.isEmpty()) "Choose photos/videos" else "Add more")
+                }
+
+                if (attachments.isNotEmpty()) {
+                    Spacer(Modifier.height(16.dp))
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        items(attachments) { uri ->
+                            val isVideo = context.contentResolver.getType(uri)?.startsWith("video") == true
+                            Box(
+                                modifier = Modifier
+                                    .size(84.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                            ) {
+                                if (isVideo) {
+                                    Icon(
+                                        Icons.Default.Videocam,
+                                        contentDescription = "Video attachment",
+                                        modifier = Modifier.size(32.dp).align(Alignment.Center)
+                                    )
+                                } else {
+                                    AsyncImage(
+                                        model = uri,
+                                        contentDescription = "Image attachment",
+                                        modifier = Modifier.fillMaxSize(),
+                                        contentScale = ContentScale.Crop
+                                    )
+                                }
+                                IconButton(
+                                    onClick = {
+                                        attachments = attachments - uri
+                                        copied = false
+                                    },
+                                    modifier = Modifier.align(Alignment.TopEnd).size(22.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.Close,
+                                        contentDescription = "Remove",
+                                        tint = MaterialTheme.colorScheme.onSurface,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(Modifier.height(24.dp))
+                    Button(
+                        onClick = {
+                            val clipItems = attachments.map { ClipData.Item(it) }
+                            val clipData = ClipData("YT Saver attachments", arrayOf("image/*", "video/*"), clipItems.first())
+                            clipItems.drop(1).forEach { clipData.addItem(it) }
+                            val manager = context.getSystemService(ClipboardManager::class.java)
+                            manager.setPrimaryClip(clipData)
+                            copied = true
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Copy ${attachments.size} to clipboard")
+                    }
+                    if (copied) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "Copied — now paste it wherever you need it.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(24.dp))
+                HorizontalDivider()
+                Spacer(Modifier.height(16.dp))
+                Text("Upload to my server", style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Sends the actual file to your own server, so it can be downloaded anywhere — not limited to this phone the way clipboard copying is. Always overwrites the same file there.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center
+                )
+                Spacer(Modifier.height(8.dp))
+
+                if (showServerSettings) {
+                    OutlinedTextField(
+                        value = serverUrl,
+                        onValueChange = { serverUrl = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text("Upload URL (e.g. .../upload.php)") }
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = serverSecret,
+                        onValueChange = { serverSecret = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text("Secret (matches \$SECRET in upload.php)") }
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Button(
+                        onClick = {
+                            PersonalServerSettings.setUploadUrl(context, serverUrl)
+                            PersonalServerSettings.setSecret(context, serverSecret)
+                            showServerSettings = false
+                        },
+                        enabled = serverUrl.isNotBlank(),
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Save server settings") }
+                } else {
+                    Text(
+                        serverUrl,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    TextButton(onClick = { showServerSettings = true }) { Text("Change server settings") }
+                }
+
+                if (!showServerSettings && attachments.isNotEmpty()) {
+                    val imageCount = attachments.count { context.contentResolver.getType(it)?.startsWith("image") == true }
+                    if (imageCount > 0) {
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = noteText,
+                            onValueChange = { noteText = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            label = { Text("Note (optional)") },
+                            placeholder = { Text("e.g. instructions for Claude to read on the image") }
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            if (imageCount > 1) {
+                                "$imageCount images picked — they'll be stacked into one tall picture, with this note added underneath, before uploading."
+                            } else {
+                                "This note will be added underneath the picture before uploading."
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Button(
+                        onClick = {
+                            uploading = true
+                            uploadStatus = null
+                            scope.launch {
+                                val images = attachments.filter { context.contentResolver.getType(it)?.startsWith("image") == true }
+                                val videos = attachments - images.toSet()
+                                var lastError: String? = null
+                                var uploadedImage = false
+                                var uploadedVideo = false
+
+                                if (images.isNotEmpty()) {
+                                    // Always combined (even a single image) so the note text — if
+                                    // any — gets baked into the same image as its own block
+                                    // underneath, the same way Transcribe adds the transcript.
+                                    ImageCombiner.combineVerticallyWithText(context, images, noteText).fold(
+                                        onSuccess = { combinedFile ->
+                                            PersonalServerUploader.uploadFile(context, combinedFile, "image/jpeg", isVideo = false)
+                                                .onSuccess { uploadedImage = true }
+                                                .onFailure { e -> lastError = e.message ?: "Upload failed" }
+                                            combinedFile.delete()
+                                        },
+                                        onFailure = { e -> lastError = e.message ?: "Couldn't combine the images" }
+                                    )
+                                }
+                                // Each video overwrites the same 1.mp4 slot (separate from images'
+                                // 1.jpg) — videos can't be stacked the way images are, so if more
+                                // than one is picked, only the last one uploaded remains there.
+                                for (uri in videos) {
+                                    val mimeType = context.contentResolver.getType(uri) ?: "video/mp4"
+                                    PersonalServerUploader.upload(context, uri, mimeType, isVideo = true)
+                                        .onSuccess { uploadedVideo = true }
+                                        .onFailure { e -> lastError = e.message ?: "Upload failed" }
+                                }
+
+                                uploading = false
+                                if (lastError != null && !uploadedImage && !uploadedVideo) {
+                                    uploadStatus = lastError
+                                } else {
+                                    // The script keeps images and videos in separate fixed slots
+                                    // (1.jpg / 1.mp4) next to itself, so each URL is just the upload
+                                    // URL's folder + that fixed name — shown as plain text (not the
+                                    // media itself) and copied to the clipboard automatically, since
+                                    // text is the one thing that actually survives a remote-desktop
+                                    // clipboard sync.
+                                    val folder = serverUrl.substringBeforeLast('/')
+                                    val lines = mutableListOf<String>()
+                                    if (uploadedImage) lines.add("Image: $folder/1.jpg")
+                                    if (uploadedVideo) lines.add("Video: $folder/1.mp4")
+                                    val message = "Uploaded to the following URL(s):\n" + lines.joinToString("\n")
+                                    uploadStatus = message
+                                    val manager = context.getSystemService(ClipboardManager::class.java)
+                                    manager.setPrimaryClip(ClipData.newPlainText("Uploaded URL", message))
+                                }
+                            }
+                        },
+                        enabled = !uploading,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(if (uploading) "Uploading…" else "Upload to my server")
+                    }
+                    uploadStatus?.let {
+                        Spacer(Modifier.height(8.dp))
+                        if (it.startsWith("Uploaded to the following URL")) {
+                            // A real (read-only) text box, not just a label — already auto-copied
+                            // to the clipboard, but this lets it be selected/copied again by hand
+                            // if that clipboard content gets overwritten by something else first.
+                            OutlinedTextField(
+                                value = it,
+                                onValueChange = {},
+                                readOnly = true,
+                                modifier = Modifier.fillMaxWidth(),
+                                textStyle = MaterialTheme.typography.bodySmall,
+                                label = { Text("Uploaded URL (already copied)") },
+                                trailingIcon = {
+                                    IconButton(onClick = {
+                                        val manager = context.getSystemService(ClipboardManager::class.java)
+                                        manager.setPrimaryClip(ClipData.newPlainText("Uploaded URL", it))
+                                    }) {
+                                        Icon(Icons.Default.ContentCopy, contentDescription = "Copy")
+                                    }
+                                }
+                            )
+                        } else {
+                            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

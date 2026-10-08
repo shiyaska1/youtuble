@@ -3,6 +3,8 @@ package com.mobicareapp.ui.browser
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.os.Message
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
@@ -86,11 +88,38 @@ internal fun launchExternalUrlIfNeeded(context: Context, url: String): Boolean {
     }.getOrDefault(false)
 }
 
+// Hosts a window.open() popup actually lands on when it's a real sign-in/OAuth flow, as opposed
+// to an ad or a "tap anywhere on this page" popup hijack — which is what window.open() is used
+// for on most of the sketchier sites people paste into Browse. Checked against the popup's own
+// first navigation (not whatever page opened it), since the destination is what tells the two
+// apart.
+private val AUTH_POPUP_HOSTS = listOf(
+    "accounts.google.com",
+    "appleid.apple.com",
+    "login.microsoftonline.com",
+    "login.live.com",
+    "github.com"
+)
+
+private fun looksLikeAuthPopup(url: String): Boolean {
+    val host = runCatching { Uri.parse(url).host }.getOrNull()?.lowercase() ?: return false
+    if (AUTH_POPUP_HOSTS.any { host == it || host.endsWith(".$it") }) return true
+    // Facebook's actual login/OAuth dialog, as opposed to an ordinary www.facebook.com page a
+    // popup ad might also point at.
+    if (host.endsWith("facebook.com") && url.contains("/dialog/oauth")) return true
+    return false
+}
+
 /**
  * Google's sign-in (and many other OAuth flows) opens via window.open() into a popup rather than
- * navigating the current page — a bare WebView silently drops that. This hands the popup's own
- * WebView back to the caller (to host in a Dialog on top of the page that requested it), which is
- * what lets the flow complete.
+ * navigating the current page — a bare WebView silently drops that. But popups can't just be
+ * blocked outright or sign-in breaks; on an ordinary site, window.open() is almost always an ad
+ * or a popup hijack instead, which is what this actually guards against. The popup is created and
+ * allowed to navigate, but only shown (handed to the caller to host in a Dialog) once it lands on
+ * a known sign-in/OAuth host — anything else, the common case, is torn down unseen, which from the
+ * user's side looks exactly like the new tab/window never opened. A short timeout also tears down
+ * a popup that never reveals itself, so a page that opens one and never navigates it anywhere
+ * doesn't just sit running in the background indefinitely.
  */
 internal fun popupHostingWebChromeClient(
     onPopupRequested: (WebView) -> Unit,
@@ -101,16 +130,34 @@ internal fun popupHostingWebChromeClient(
 
         val popup = WebView(view.context)
         configureAsRealBrowser(popup)
+        var revealed = false
+        val handler = Handler(Looper.getMainLooper())
+        val giveUpAndClose = Runnable { if (!revealed) popup.destroy() }
+
+        fun revealIfAuthUrl(url: String?) {
+            if (revealed || url == null || !looksLikeAuthPopup(url)) return
+            revealed = true
+            handler.removeCallbacks(giveUpAndClose)
+            onPopupRequested(popup)
+        }
+
         popup.webViewClient = object : WebViewClient() {
-            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean =
-                launchExternalUrlIfNeeded(view.context, request.url.toString())
+            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                if (launchExternalUrlIfNeeded(view.context, request.url.toString())) return true
+                revealIfAuthUrl(request.url.toString())
+                return false
+            }
+
+            override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {
+                revealIfAuthUrl(url)
+            }
         }
         popup.webChromeClient = object : WebChromeClient() {
             override fun onCloseWindow(window: WebView) {
-                onPopupClosed()
+                if (revealed) onPopupClosed() else popup.destroy()
             }
         }
-        onPopupRequested(popup)
+        handler.postDelayed(giveUpAndClose, 8_000L)
 
         transport.webView = popup
         resultMsg.sendToTarget()

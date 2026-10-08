@@ -66,7 +66,7 @@ object ScanFileStore {
         return SavedScan(pdfFile, thumbnailFile ?: pdfFile, pageFiles)
     }
 
-    private fun writeScaledJpeg(bitmap: Bitmap, file: File): File {
+    internal fun writeScaledJpeg(bitmap: Bitmap, file: File): File {
         val maxDim = 480
         val scale = maxDim.toFloat() / maxOf(bitmap.width, bitmap.height)
         val scaled = if (scale < 1f) {
@@ -119,16 +119,16 @@ object ScanFileStore {
         pagePaths.firstOrNull()?.let { File(it).parentFile }?.takeIf { it.list()?.isEmpty() == true }?.delete()
     }
 
-    private fun scansDir(context: Context): File =
+    internal fun scansDir(context: Context): File =
         File(context.getExternalFilesDir(null), "Scans").apply { mkdirs() }
 
-    private fun thumbsDir(context: Context): File =
+    internal fun thumbsDir(context: Context): File =
         File(scansDir(context), "thumbs").apply { mkdirs() }
 
-    private fun pagesDir(context: Context, baseName: String): File =
+    internal fun pagesDir(context: Context, baseName: String): File =
         File(scansDir(context), "pages/$baseName").apply { mkdirs() }
 
-    private fun uniqueFile(dir: File, baseName: String, extension: String): File {
+    internal fun uniqueFile(dir: File, baseName: String, extension: String): File {
         var candidate = File(dir, "$baseName.$extension")
         var counter = 1
         while (candidate.exists()) {

@@ -36,4 +36,7 @@ internal object VideoEncoderSupport {
         "libopenh264" -> "-c:v libopenh264 -b:v 4M"
         else -> "-c:v $encoder -q:v 5"
     }
+
+    /** Same encoder choice, but pinned to an explicit bitrate instead of a quality target — for compressing to a predictable file size rather than preserving quality at whatever the source's own bitrate was. */
+    fun encodeArgsWithBitrate(bitrateBps: Int): String = "-c:v ${detectEncoder()} -b:v $bitrateBps"
 }
