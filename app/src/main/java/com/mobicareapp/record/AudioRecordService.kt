@@ -130,13 +130,11 @@ class AudioRecordService : Service() {
             newRecorder.prepare()
             newRecorder.start()
             recorder = newRecorder
-            // Cuts down steady background noise (fans, traffic, hiss) in the captured audio.
-            // MediaRecorder (unlike AudioRecord) doesn't expose a session id up front — it's
-            // only readable via the active recording configuration once actually recording.
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val sessionId = newRecorder.activeRecordingConfiguration?.clientAudioSessionId
-                if (sessionId != null) noiseSuppressor = RecordFileStore.attachNoiseSuppressor(sessionId)
-            }
+            // No noise suppressor on this recording any more: an earlier version attached one to the
+            // recorder's audio session, and from then on recording a phone call (the customer's voice
+            // coming out of the speaker) stopped working, where the version before it recorded it
+            // fine. The raw microphone signal is what call recording needs. Background noise can
+            // still be removed afterwards with the Library's "Filter noise" options.
             if (isNewSession) {
                 wakeLock = RecordFileStore.acquireWakeLock(this, "ytsaver:audio-record")
                 RecordingStatus.started(MediaType.AUDIO, RecordingSource.MIC)

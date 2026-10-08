@@ -329,6 +329,16 @@ fun RecordScreen() {
             }
         }
 
+        if (active == null && mode == RecordMode.AUDIO) {
+            Spacer(Modifier.height(12.dp))
+            Text(
+                "Recording a phone or WhatsApp call? Put the call on speaker, start recording, then take the call.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
+        }
+
         if (active == null && mode == RecordMode.SCREEN) {
             Spacer(Modifier.height(12.dp))
             Text(
