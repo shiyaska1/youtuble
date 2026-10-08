@@ -26,6 +26,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -37,7 +38,10 @@ class AudioRecordService : Service() {
     // Plain (manual, non-voice-gated) capture: MediaRecorder writing AAC/MP4 directly.
     private var recorder: MediaRecorder? = null
     private var outputPfd: ParcelFileDescriptor? = null
-    private var rotationJob: Job? = null
+    // Watches the microphone level of the plain recording — see [startSilenceWatchdog].
+    private var watchdogJob: Job? = null
+    // True while the recording is running but no sound is reaching it (shown in the notification).
+    @Volatile private var silenceWarning = false
 
     // Voice-gated capture (voice-activated / always-listen): raw PCM via AudioRecord instead of
     // MediaRecorder. Deciding "is this actually speech, not just loud" needs the frequency content
@@ -89,10 +93,11 @@ class AudioRecordService : Service() {
     // Plain (manual, non-voice-gated) recording — unchanged MediaRecorder/AAC path.
     // ---------------------------------------------------------------------------------------
 
-    private fun beginPlainRecording(isNewSession: Boolean = true) {
+    private fun beginPlainRecording(isNewSession: Boolean = true, sourceIndex: Int = 0) {
         if (recorder != null) return
         try {
             if (isNewSession) {
+                silenceWarning = false
                 startForeground(NOTIFICATION_ID, buildNotification())
                 sessionBaseName = RecordFileStore.timestampedName(MediaType.AUDIO)
                 segmentIndex = 1
@@ -103,11 +108,17 @@ class AudioRecordService : Service() {
             target = newTarget
 
             val newRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) MediaRecorder(this) else @Suppress("DEPRECATION") MediaRecorder()
-            // VOICE_COMMUNICATION was tried here for stronger built-in noise suppression, but on
-            // several devices it silently records with no usable audio at all unless the app also
-            // explicitly puts AudioManager into MODE_IN_COMMUNICATION — not worth that fragility
-            // now that Library's manual/live EQ filters give real, working noise control instead.
-            newRecorder.setAudioSource(MediaRecorder.AudioSource.MIC)
+            // The normal microphone first. While a call or meeting (Google Meet, WhatsApp call…) is
+            // using the mic, Android may hand this recording only silence; [startSilenceWatchdog]
+            // notices that in the first seconds and restarts on the next source in [AUDIO_SOURCES]
+            // (some phones let a different source through). VOICE_COMMUNICATION is the last resort,
+            // since on its own it can record nothing usable on some devices.
+            newRecorder.setAudioSource(AUDIO_SOURCES[sourceIndex.coerceIn(0, AUDIO_SOURCES.lastIndex)])
+            newRecorder.setOnErrorListener { _, _, _ ->
+                // The system ended the recording (mic taken away, storage trouble…) — keep what was captured.
+                RecordingStatus.reportError("The recording was interrupted. What was captured so far has been saved.")
+                if (recorder != null) stopPlainRecording()
+            }
             newRecorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
             newRecorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
             // Mono + a lower bitrate — voice doesn't need stereo or music-grade quality, and this
@@ -130,10 +141,7 @@ class AudioRecordService : Service() {
                 wakeLock = RecordFileStore.acquireWakeLock(this, "ytsaver:audio-record")
                 RecordingStatus.started(MediaType.AUDIO, RecordingSource.MIC)
             }
-            rotationJob = serviceScope.launch {
-                delay(SEGMENT_DURATION_MS)
-                rotatePlainSegment()
-            }
+            startSilenceWatchdog(sourceIndex)
         } catch (e: Exception) {
             RecordingStatus.reportError(e.message ?: "Couldn't start audio recording")
             cleanupPlainAfterFailure()
@@ -141,19 +149,60 @@ class AudioRecordService : Service() {
     }
 
     /**
-     * MediaRecorder only writes a playable file's final index (the MP4 "moov" atom) once stop()
-     * completes cleanly — if the app/phone dies mid-recording before that, the file is unplayable
-     * even though the raw audio data was written the whole time. Rather than trying to make one
-     * MediaRecorder session safe against that, this periodically finishes the current segment as a
-     * complete, valid file and immediately starts a new one for the next stretch — so a crash
-     * mid-recording only costs the currently-in-progress segment, not everything recorded before.
+     * One recording is now ONE continuous file from Start to Stop — it used to be cut into a new
+     * file every 5 minutes (so a crash would only lose the current stretch), which broke long
+     * meetings into many parts. The trade-off: the file is only playable once Stop finishes it
+     * cleanly, so if the phone dies or the app is force-killed mid-recording, that recording is lost.
+     *
+     * This watches the microphone level once a second. A level of exactly 0 means no sound is
+     * reaching the recorder at all (a live mic always has a little noise) — typically because a call
+     * or meeting app holds the microphone and Android feeds this recording silence. If that is the case
+     * from the very start, it restarts on the next source in [AUDIO_SOURCES] (the silent first seconds
+     * are thrown away, so nothing audible is cut). If it goes silent later, or no source works, the
+     * recording carries on unbroken and the user is warned, instead of finding out afterwards.
      */
-    private fun rotatePlainSegment() {
-        if (recorder == null) return // Already stopped for real by the time this fired.
-        val result = stopMediaRecorderOnly()
-        segmentIndex++
-        serviceScope.launch { savePlainSegment(result, reportShortRecordingError = false) }
-        beginPlainRecording(isNewSession = false)
+    private fun startSilenceWatchdog(sourceIndex: Int) {
+        watchdogJob?.cancel()
+        watchdogJob = serviceScope.launch {
+            var silentSeconds = 0
+            var heardSound = false
+            runCatching { recorder?.maxAmplitude } // the first reading is always 0 — discard it
+            while (true) {
+                delay(1000)
+                val current = recorder ?: return@launch
+                val level = runCatching { current.maxAmplitude }.getOrNull() ?: return@launch
+                if (level > 0) {
+                    heardSound = true
+                    silentSeconds = 0
+                    if (silenceWarning) {
+                        silenceWarning = false
+                        updateNotification()
+                    }
+                } else {
+                    silentSeconds++
+                    if (!heardSound && silentSeconds >= SILENT_SECONDS_BEFORE_SWITCH && sourceIndex < AUDIO_SOURCES.lastIndex) {
+                        withContext(Dispatchers.Main) { switchToNextSource(sourceIndex + 1) }
+                        return@launch
+                    }
+                    if (silentSeconds >= SILENT_SECONDS_BEFORE_WARNING && !silenceWarning) {
+                        silenceWarning = true
+                        updateNotification()
+                        RecordingStatus.reportError(
+                            "No sound is reaching the recorder. Another app (such as a Google Meet or phone call) is probably using the microphone, " +
+                                "and Android gives it priority. The recording keeps going."
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    /** Throws away the silent attempt and starts a fresh recording on [sourceIndex]; same session name, so it's still one recording to the user. */
+    private fun switchToNextSource(sourceIndex: Int) {
+        if (recorder == null) return
+        val silent = stopMediaRecorderOnly()
+        silent.target?.let { RecordFileStore.abandon(this, it) }
+        beginPlainRecording(isNewSession = false, sourceIndex = sourceIndex)
     }
 
     private data class PlainSegmentResult(val target: RecordTarget?, val stoppedCleanly: Boolean)
@@ -188,8 +237,8 @@ class AudioRecordService : Service() {
     }
 
     private fun stopPlainRecording() {
-        rotationJob?.cancel()
-        rotationJob = null
+        watchdogJob?.cancel()
+        watchdogJob = null
         val result = stopMediaRecorderOnly()
         releaseWakeLock()
         RecordingStatus.stopped()
@@ -210,8 +259,8 @@ class AudioRecordService : Service() {
     }
 
     private fun cleanupPlainAfterFailure() {
-        rotationJob?.cancel()
-        rotationJob = null
+        watchdogJob?.cancel()
+        watchdogJob = null
         target?.let { RecordFileStore.abandon(this, it) }
         target = null
         runCatching { recorder?.release() }
@@ -361,7 +410,6 @@ class AudioRecordService : Service() {
                             }
                         }
                     }
-                    if (now - recordingStartedAtMs >= SEGMENT_DURATION_MS) rotateVoiceCycleFile()
                 }
             }
         }
@@ -398,20 +446,6 @@ class AudioRecordService : Service() {
         everDetectedVoice = false
         recordingStartedAtMs = System.currentTimeMillis()
         updateNotification()
-        openNewCycleFile()
-    }
-
-    /** Mid-utterance rotation for a very long recording — same reasoning as the plain path's segment rotation, just for a .wav clip that's still actively capturing speech. */
-    private suspend fun rotateVoiceCycleFile() {
-        val writer = wavWriter
-        val finishedTarget = target
-        wavWriter = null
-        runCatching { writer?.finish() }
-        if (finishedTarget != null) {
-            RecordFileStore.finalizeAndSave(applicationContext, finishedTarget, MediaType.AUDIO, RecordFileStore.timestampedName(MediaType.AUDIO), fileExtension = "wav")
-        }
-        segmentIndex++
-        recordingStartedAtMs = System.currentTimeMillis()
         openNewCycleFile()
     }
 
@@ -458,7 +492,8 @@ class AudioRecordService : Service() {
             continuousListening -> "Listening for voice…" to "Always-listen mode — tap Stop to turn off"
             voiceActivated && everDetectedVoice -> "Recording speech…" to "Auto-saves once you stop talking"
             voiceActivated -> "Listening for voice…" to "Discards automatically if no one speaks"
-            else -> "Recording audio" to "Tap Stop to finish and save"
+            silenceWarning -> "Recording — no sound heard" to "Another app (a call or meeting) may be using the microphone"
+            else -> "Recording audio" to "One continuous file — tap Stop to finish and save"
         }
         return NotificationCompat.Builder(this, YtSaverApp.RECORD_CHANNEL_ID)
             .setContentTitle(title)
@@ -486,9 +521,15 @@ class AudioRecordService : Service() {
         private const val EXTRA_AUTO_TRANSCRIBE = "autoTranscribe"
         private const val EXTRA_VOICE_ACTIVATED = "voiceActivated"
         private const val EXTRA_CONTINUOUS = "continuousListening"
-        // Same 5-minute interval for both capture paths: short enough that a crash mid-recording
-        // never costs much. Non-private so RecordScreen can show the same live countdown.
-        const val SEGMENT_DURATION_MS = 5 * 60 * 1000L
+        // Tried in order for a plain recording: the normal mic first, then the sources some phones
+        // keep delivering sound on while a call/meeting app is using the microphone.
+        private val AUDIO_SOURCES = intArrayOf(
+            MediaRecorder.AudioSource.MIC,
+            MediaRecorder.AudioSource.VOICE_RECOGNITION,
+            MediaRecorder.AudioSource.VOICE_COMMUNICATION
+        )
+        private const val SILENT_SECONDS_BEFORE_SWITCH = 8
+        private const val SILENT_SECONDS_BEFORE_WARNING = 12
 
         // Voice-gated capture tuning. Not empirically tuned against real recordings — reasonable
         // starting points that can be adjusted if they turn out too strict/loose in practice.

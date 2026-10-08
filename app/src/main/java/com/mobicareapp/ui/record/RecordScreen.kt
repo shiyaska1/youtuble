@@ -405,10 +405,8 @@ fun RecordScreen() {
                         textAlign = TextAlign.Center
                     )
                 } else {
-                    val segmentSeconds = AudioRecordService.SEGMENT_DURATION_MS / 1000
-                    val secondsUntilAutoSave = segmentSeconds - (elapsedSeconds % segmentSeconds)
                     Text(
-                        "Auto-saves as a file in ${formatElapsed(secondsUntilAutoSave)}, then every 5 min after",
+                        "One continuous recording - tap Stop to save it. Keep this phone charged for long meetings.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = TextAlign.Center
