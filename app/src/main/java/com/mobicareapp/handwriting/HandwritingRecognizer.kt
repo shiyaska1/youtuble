@@ -61,6 +61,8 @@ object HandwritingRecognizer {
         val width = (strokes.maxOf { it.maxX } - strokes.minOf { it.minX }) * SCALE
         val height = (strokes.maxOf { it.maxY } - strokes.minOf { it.minY }) * SCALE
         val context = RecognitionContext.builder()
+            // The recognizer requires a pre-context (the text just before this); there is none here.
+            .setPreContext("")
             .setWritingArea(WritingArea(width.coerceAtLeast(20f), height.coerceAtLeast(20f)))
             .build()
         return client().recognize(ink, context).await().candidates.map { it.text }.take(3)
@@ -88,6 +90,7 @@ object HandwritingRecognizer {
             val top = strokes.minOf { it.minY } * SCALE
             val bottom = strokes.maxOf { it.maxY } * SCALE
             val context = RecognitionContext.builder()
+                .setPreContext("")
                 .setWritingArea(WritingArea(SCALE, (bottom - top).coerceAtLeast(20f)))
                 .build()
             val text = client().recognize(buildInk(strokes), context).await().candidates.firstOrNull()?.text.orEmpty()
