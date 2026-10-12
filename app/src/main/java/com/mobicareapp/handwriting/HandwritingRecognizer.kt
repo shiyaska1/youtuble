@@ -11,7 +11,6 @@ import com.google.mlkit.vision.digitalink.Ink
 import com.google.mlkit.vision.digitalink.RecognitionContext
 import com.google.mlkit.vision.digitalink.WritingArea
 import kotlinx.coroutines.tasks.await
-import kotlin.math.abs
 
 /**
  * Turns handwriting strokes into English text with Google's on-device ML Kit Digital Ink
@@ -103,32 +102,55 @@ object HandwritingRecognizer {
         return parts.joinToString(" ")
     }
 
-    private class Entry(val item: PageItem, val order: Int, val centreX: Float, val centreY: Float)
+    private class Entry(val item: PageItem, val order: Int, val centreX: Float, val minY: Float, val maxY: Float)
 
     /**
-     * Items whose vertical centres are close belong to one line. Lines are returned top to bottom.
+     * Groups items into lines by how much their vertical extents overlap, so it works for any
+     * handwriting size. (It used to compare vertical centres against a fixed distance, which cut
+     * big letters into several "lines" — the tall and the descending letters of one word are
+     * centred at quite different heights.) Lines are returned top to bottom.
      */
     private fun groupIntoLines(items: List<PageItem>): List<List<Entry>> {
         val entries = items.mapIndexed { index, item ->
             when (item) {
-                is InkItem -> Entry(item, index, (item.stroke.minX + item.stroke.maxX) / 2f, (item.stroke.minY + item.stroke.maxY) / 2f)
-                is WordItem -> Entry(item, index, item.x + item.width / 2f, item.centreY)
+                is InkItem -> Entry(item, index, (item.stroke.minX + item.stroke.maxX) / 2f, item.stroke.minY, item.stroke.maxY)
+                is WordItem -> Entry(item, index, item.x + item.width / 2f, item.y, item.y + item.size * 1.2f)
             }
-        }.sortedBy { it.centreY }
+        }.sortedBy { it.minY }
 
         val lines = mutableListOf<MutableList<Entry>>()
+        var lineMin = 0f
+        var lineMax = 0f
         for (entry in entries) {
-            val line = lines.lastOrNull()
-            val lineCentre = line?.map { it.centreY }?.average()?.toFloat()
-            if (line != null && lineCentre != null && abs(entry.centreY - lineCentre) <= LINE_GAP) line += entry
-            else lines += mutableListOf(entry)
+            if (lines.isNotEmpty() && sameLine(lineMin, lineMax, entry.minY, entry.maxY)) {
+                lines.last() += entry
+                lineMin = minOf(lineMin, entry.minY)
+                lineMax = maxOf(lineMax, entry.maxY)
+            } else {
+                lines += mutableListOf(entry)
+                lineMin = entry.minY
+                lineMax = entry.maxY
+            }
         }
         return lines
+    }
+
+    /**
+     * True when two vertical ranges (in page widths) belong to the same line of writing: they overlap
+     * by a good part of the smaller one, or sit almost touching (the dot of an "i" floats just above
+     * its stem).
+     */
+    fun sameLine(aMin: Float, aMax: Float, bMin: Float, bMax: Float): Boolean {
+        val overlap = minOf(aMax, bMax) - maxOf(aMin, bMin)
+        val smaller = minOf(aMax - aMin, bMax - bMin)
+        if (overlap >= 0.3f * smaller && overlap >= 0f) return true
+        val gap = maxOf(aMin - bMax, bMin - aMax, 0f)
+        return gap <= LINE_JOIN_GAP
     }
 
     /** The page is drawn in units of its width; the recognizer wants bigger numbers than 0..1. */
     private const val SCALE = 1000f
 
-    /** How far (in page widths) an item's centre may drift from its line's average and still be the same line. */
-    private const val LINE_GAP = 0.045f
+    /** Vertical distance (in page widths) below which two pieces of writing still count as one line. */
+    private const val LINE_JOIN_GAP = 0.02f
 }

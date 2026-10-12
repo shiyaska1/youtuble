@@ -144,6 +144,7 @@ fun HandwritingScreen(onBack: () -> Unit) {
     // Nudge towards "Next page" once writing reaches the bottom edge.
     val pageFull = page.lowestY > canvasRatio * 0.9f
     val suggestions by viewModel.suggestions.collectAsState()
+    val readError by viewModel.readError.collectAsState()
 
     if (confirmClearPage) {
         AlertDialog(
@@ -243,6 +244,13 @@ fun HandwritingScreen(onBack: () -> Unit) {
                             maxLines = 4,
                             modifier = Modifier.fillMaxWidth()
                         )
+                        readError?.let { message ->
+                            Text(
+                                "Couldn't read the handwriting: $message",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
                         if (page.textEdited) {
                             Text(
                                 "Edited by hand — new writing won't change this text. Tap Re-read to read the handwriting again.",
@@ -266,6 +274,12 @@ fun HandwritingScreen(onBack: () -> Unit) {
                                 Icon(Icons.Default.AutoFixHigh, contentDescription = null, modifier = Modifier.size(16.dp))
                                 Spacer(Modifier.width(4.dp))
                                 Text("Fix")
+                            }
+                            // Reads the handwriting right now (it normally happens a moment after the pen stops).
+                            TextButton(enabled = page.items.isNotEmpty() && !busy, onClick = { viewModel.readNow(index) }) {
+                                Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("Read")
                             }
                             TextButton(enabled = page.text.isNotBlank(), onClick = { copyToClipboard(context, page.text) }) {
                                 Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
