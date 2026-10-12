@@ -74,7 +74,9 @@ fun HandwritingPreviewScreen(
             OutlinedTextField(
                 value = text,
                 onValueChange = onTextChange,
-                placeholder = { Text("Nothing written yet. Go back and write on the pad.") },
+                // A size smaller than the default text, so more of a long paragraph fits on screen.
+                textStyle = MaterialTheme.typography.bodyMedium,
+                placeholder = { Text("Nothing written yet. Go back and write on the pad.", style = MaterialTheme.typography.bodyMedium) },
                 modifier = Modifier.weight(1f).fillMaxWidth()
             )
             Text(
@@ -110,7 +112,7 @@ fun HandwritingPreviewScreen(
                 TextButton(onClick = onRefresh) {
                     Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(4.dp))
-                    Text("Refresh from pages")
+                    Text("Refresh", maxLines = 1)
                 }
             }
         }

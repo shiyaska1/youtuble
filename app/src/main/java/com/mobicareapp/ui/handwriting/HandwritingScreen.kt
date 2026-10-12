@@ -341,7 +341,8 @@ private fun HandwritingContent(onBack: () -> Unit, showPreview: Boolean, onShowP
                         OutlinedTextField(
                             value = page.text,
                             onValueChange = { viewModel.setPageText(index, it) },
-                            placeholder = { Text("Your handwriting appears here as text…") },
+                            textStyle = MaterialTheme.typography.bodyMedium,
+                            placeholder = { Text("Your handwriting appears here as text…", style = MaterialTheme.typography.bodyMedium) },
                             minLines = 3,
                             maxLines = 5,
                             modifier = Modifier.fillMaxWidth()
