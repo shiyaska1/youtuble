@@ -113,6 +113,11 @@ dependencies {
     // framing the original photo happened to have.
     implementation("com.google.mlkit:face-detection:16.1.7")
 
+    // On-device handwriting recognition for the Handwriting tool: turns finger/stylus strokes into
+    // English text. The small English model downloads once (needs internet the first time), after
+    // which recognition works offline.
+    implementation("com.google.mlkit:digital-ink-recognition:18.1.0")
+
     // On-device OCR for the PDF text-extraction tool: Latin script covers English, a separate
     // recognizer model covers Devanagari script (Hindi) — ML Kit doesn't ship one for Malayalam or
     // Arabic script at all, on-device or otherwise.

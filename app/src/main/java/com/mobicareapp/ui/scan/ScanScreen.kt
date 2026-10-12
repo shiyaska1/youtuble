@@ -52,6 +52,7 @@ import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Portrait
 import androidx.compose.material.icons.filled.CloudUpload
+import androidx.compose.material.icons.filled.Draw
 import androidx.compose.material.icons.filled.Quiz
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.filled.RotateRight
@@ -95,6 +96,7 @@ import coil.compose.AsyncImage
 import com.mobicareapp.applock.AppLockManager
 import com.mobicareapp.data.ScannedDocument
 import com.mobicareapp.scan.ScanFileStore
+import com.mobicareapp.ui.handwriting.HandwritingScreen
 import com.mobicareapp.ui.upload.UploadLinkScreen
 import com.mobicareapp.wifisend.WifiSendDialog
 import kotlinx.coroutines.Dispatchers
@@ -124,6 +126,7 @@ fun ScanScreen() {
     var showImageMarkup by remember { mutableStateOf(false) }
     var showQuestionPaper by remember { mutableStateOf(false) }
     var showUploadLink by remember { mutableStateOf(false) }
+    var showHandwriting by remember { mutableStateOf(false) }
 
     // Rendered unconditionally (rather than inside one of the branches below) so it stays on top
     // as an overlay no matter which screen — the document list or a single document's pages — is
@@ -187,6 +190,11 @@ fun ScanScreen() {
 
     if (showUploadLink) {
         UploadLinkScreen(onBack = { showUploadLink = false })
+        return
+    }
+
+    if (showHandwriting) {
+        HandwritingScreen(onBack = { showHandwriting = false })
         return
     }
 
@@ -296,6 +304,11 @@ fun ScanScreen() {
                                 text = { Text("Upload file & get link") },
                                 onClick = { showMoreTools = false; showUploadLink = true },
                                 leadingIcon = { Icon(Icons.Default.CloudUpload, contentDescription = null) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Handwriting to text") },
+                                onClick = { showMoreTools = false; showHandwriting = true },
+                                leadingIcon = { Icon(Icons.Default.Draw, contentDescription = null) }
                             )
                         }
                     }
