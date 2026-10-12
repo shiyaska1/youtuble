@@ -1,5 +1,6 @@
 package com.mobicareapp.handwriting
 
+import android.content.Context
 import com.google.mlkit.common.model.DownloadConditions
 import com.google.mlkit.common.model.RemoteModelManager
 import com.google.mlkit.vision.digitalink.DigitalInkRecognition
@@ -43,14 +44,32 @@ object HandwritingRecognizer {
         recognizer ?: DigitalInkRecognition.getClient(DigitalInkRecognizerOptions.builder(model).build()).also { recognizer = it }
 
     /**
-     * Reads everything on the page, in the order it was written, one run of writing per line of the
-     * result. Each run is turned level first (see [InkLayout]), so it makes no difference whether it
-     * was written straight across, at a slant, or up the page.
+     * Reads everything on the page, in the order it was written. Each run of writing is turned level
+     * first (see [InkLayout]), so it makes no difference whether it was written straight across, at a
+     * slant, or up the page.
+     *
+     * The result is one flowing text, never a line break between runs: writing that carries on onto
+     * the next line is a continuation, not a new paragraph. If the end of one run and the start of
+     * the next are really one word split across the lines ("me" + "rge"), they are joined up.
      */
-    suspend fun recognize(items: List<PageItem>): String {
+    suspend fun recognize(items: List<PageItem>, context: Context): String {
         if (items.isEmpty()) return ""
-        val lines = InkLayout.buildRuns(items).map { run -> readRun(run) }
-        return lines.filter { it.isNotBlank() }.joinToString("\n")
+        val pieces = InkLayout.buildRuns(items).map { run -> readRun(run) }.filter { it.isNotBlank() }
+        val text = StringBuilder()
+        for (piece in pieces) {
+            if (text.isEmpty()) {
+                text.append(piece)
+                continue
+            }
+            val lastWord = text.toString().substringAfterLast(' ')
+            val firstWord = piece.substringBefore(' ')
+            val splitWord = lastWord.isNotEmpty() && firstWord.isNotEmpty() &&
+                !WordSuggester.isWord(context, firstWord) &&
+                WordSuggester.isWord(context, lastWord + firstWord)
+            if (!splitWord) text.append(' ')
+            text.append(piece)
+        }
+        return text.toString()
     }
 
     /** The recognizer's best guesses (most likely first) for one partly written word — used to offer completions. */

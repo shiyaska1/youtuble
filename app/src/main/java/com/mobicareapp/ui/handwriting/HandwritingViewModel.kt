@@ -265,7 +265,7 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
             if (page.textEdited) return@launch
             _busy.value = true
             try {
-                val text = HandwritingRecognizer.recognize(page.items)
+                val text = HandwritingRecognizer.recognize(page.items, context)
                 // Only store the result if the page wasn't edited by hand while this was running.
                 updatePage(index) { current -> if (current.textEdited) current else current.copy(text = text) }
                 _readError.value = null

@@ -62,6 +62,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
@@ -338,26 +339,27 @@ fun HandwritingScreen(onBack: () -> Unit) {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 OutlinedButton(onClick = { viewModel.previousPage() }, enabled = index > 0) {
-                    Icon(Icons.Default.ArrowBack, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Icon(Icons.Default.ArrowBack, contentDescription = "Previous page", modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(4.dp))
-                    Text("Previous")
+                    Text("Prev", maxLines = 1)
                 }
                 Text(
                     "Page ${index + 1} of ${pages.size}",
                     style = MaterialTheme.typography.labelLarge,
+                    maxLines = 1,
                     modifier = Modifier.weight(1f),
                     textAlign = androidx.compose.ui.text.style.TextAlign.Center
                 )
                 // Filled and relabelled when the page is full, plain otherwise — it works either way (on the last page it adds a new one).
                 if (pageFull) {
                     Button(onClick = { viewModel.nextPage() }) {
-                        Text("Page full — Next page")
+                        Text("Next", maxLines = 1)
                         Spacer(Modifier.width(4.dp))
                         Icon(Icons.Default.ArrowForward, contentDescription = null, modifier = Modifier.size(18.dp))
                     }
                 } else {
                     OutlinedButton(onClick = { viewModel.nextPage() }) {
-                        Text("Next page")
+                        Text("Next", maxLines = 1)
                         Spacer(Modifier.width(4.dp))
                         Icon(Icons.Default.ArrowForward, contentDescription = null, modifier = Modifier.size(18.dp))
                     }
@@ -380,12 +382,14 @@ private fun HandwritingCanvas(
 
     Canvas(
         modifier = modifier
+            .clipToBounds()
             .background(PaperColor)
             .onSizeChanged { if (it.width > 0) onSize(it.height.toFloat() / it.width) }
             .pointerInput(Unit) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
                     val width = size.width.toFloat().coerceAtLeast(1f)
+                    val maxY = size.height.toFloat()
                     val points = mutableListOf(InkPt(down.position.x / width, down.position.y / width, down.uptimeMillis))
                     live = listOf(down.position)
                     down.consume()
@@ -397,8 +401,10 @@ private fun HandwritingCanvas(
                             change.consume()
                             break
                         }
-                        points += InkPt(change.position.x / width, change.position.y / width, change.uptimeMillis)
-                        live = live + change.position
+                        // A finger that slides off the page keeps drawing along its edge instead of outside it.
+                        val inside = Offset(change.position.x.coerceIn(0f, width), change.position.y.coerceIn(0f, maxY))
+                        points += InkPt(inside.x / width, inside.y / width, change.uptimeMillis)
+                        live = live + inside
                         change.consume()
                     }
                     live = emptyList()

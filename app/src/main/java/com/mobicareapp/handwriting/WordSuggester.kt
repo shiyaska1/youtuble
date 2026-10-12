@@ -17,6 +17,18 @@ object WordSuggester {
             lines.map { it.trim().lowercase(Locale.ROOT) }.filter { it.isNotEmpty() }.toList()
         }.also { words = it }
 
+    /** Is [word] in the common-word list? Used to tell whether two pieces of writing are one word split across lines ("me" + "rge" = "merge"). */
+    fun isWord(context: Context, word: String): Boolean {
+        val letters = word.filter { it.isLetter() }.lowercase(Locale.ROOT)
+        if (letters.isEmpty()) return false
+        return letters in dictionarySet(context)
+    }
+
+    @Volatile private var wordSet: Set<String>? = null
+
+    private fun dictionarySet(context: Context): Set<String> =
+        wordSet ?: load(context).toHashSet().also { wordSet = it }
+
     /**
      * Up to [limit] suggestions for the letters recognized so far. [candidates] are the recognizer's
      * guesses, best first: a hastily written "hel" may also read as "hal", so completions of the top
