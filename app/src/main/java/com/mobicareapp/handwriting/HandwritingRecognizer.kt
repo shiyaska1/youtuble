@@ -54,7 +54,14 @@ object HandwritingRecognizer {
      */
     suspend fun recognize(items: List<PageItem>, context: Context): String {
         if (items.isEmpty()) return ""
-        val pieces = InkLayout.buildRuns(items).map { run -> readRun(run) }.filter { it.isNotBlank() }
+        return joinPieces(InkLayout.buildRuns(items).map { run -> readRun(run) }.filter { it.isNotBlank() }, context)
+    }
+
+    /**
+     * Joins pieces of text (lines of writing, or whole pages) into one paragraph with spaces between
+     * them, except where a word was split across two pieces ("me" + "rge"): then it is closed up.
+     */
+    fun joinPieces(pieces: List<String>, context: Context): String {
         val text = StringBuilder()
         for (piece in pieces) {
             if (text.isEmpty()) {

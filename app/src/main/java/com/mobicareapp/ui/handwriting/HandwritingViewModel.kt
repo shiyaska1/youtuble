@@ -58,6 +58,14 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
     private val _suggestions = MutableStateFlow<List<String>>(emptyList())
     val suggestions: StateFlow<List<String>> = _suggestions.asStateFlow()
 
+    /**
+     * True while the newest strokes are still being read, so the suggestions on show are for what was
+     * written a moment ago. They are kept (dimmed) instead of being cleared and redrawn on every
+     * stroke, which looked like blinking.
+     */
+    private val _suggestionsStale = MutableStateFlow(false)
+    val suggestionsStale: StateFlow<Boolean> = _suggestionsStale.asStateFlow()
+
     /** Why the last attempt to read the handwriting failed, if it did — shown under the text panel instead of failing silently. */
     private val _readError = MutableStateFlow<String?>(null)
     val readError: StateFlow<String?> = _readError.asStateFlow()
@@ -92,7 +100,7 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
 
     fun goTo(index: Int) {
         _pageIndex.value = index.coerceIn(0, _pages.value.lastIndex)
-        _suggestions.value = emptyList()
+        clearSuggestions()
     }
 
     /** Moves to the next page, adding a fresh blank one if this was the last. */
@@ -102,12 +110,12 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
             persist()
         }
         _pageIndex.value = _pageIndex.value + 1
-        _suggestions.value = emptyList()
+        clearSuggestions()
     }
 
     fun previousPage() {
         _pageIndex.value = (_pageIndex.value - 1).coerceAtLeast(0)
-        _suggestions.value = emptyList()
+        clearSuggestions()
     }
 
     // --- writing ---------------------------------------------------------------------------
@@ -147,15 +155,14 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
 
     fun clearPage() {
         updatePage(_pageIndex.value) { HwPage() }
-        _suggestions.value = emptyList()
+        clearSuggestions()
     }
 
     /** Wipes every page and starts a fresh notepad. */
     fun newNotepad() {
         recognizeJobs.values.forEach { it.cancel() }
         recognizeJobs.clear()
-        suggestJob?.cancel()
-        _suggestions.value = emptyList()
+        clearSuggestions()
         _pages.value = listOf(HwPage())
         _pageIndex.value = 0
         persist()
@@ -163,19 +170,29 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
 
     // --- suggestions -----------------------------------------------------------------------
 
+    private fun clearSuggestions() {
+        suggestJob?.cancel()
+        _suggestions.value = emptyList()
+        _suggestionsStale.value = false
+    }
+
     /**
      * Shortly after the pen stops, reads the word being written (just its strokes so far) and offers
      * common English words that start with those letters.
      */
     private fun scheduleSuggestions(index: Int) {
         suggestJob?.cancel()
-        _suggestions.value = emptyList()
+        _suggestionsStale.value = true
         suggestJob = viewModelScope.launch {
             delay(SUGGEST_DELAY_MS)
             if (_model.value !is ModelState.Ready) return@launch
             val page = _pages.value.getOrNull(index) ?: return@launch
             val word = InkLayout.currentWord(page.items)
-            if (word == null || word.strokes.isEmpty()) return@launch
+            if (word == null || word.strokes.isEmpty()) {
+                _suggestions.value = emptyList()
+                _suggestionsStale.value = false
+                return@launch
+            }
             val candidates = runCatching { HandwritingRecognizer.candidatesFor(word) }
                 .onFailure { _readError.value = it.message ?: it.javaClass.simpleName }
                 .getOrNull() ?: return@launch
@@ -183,6 +200,7 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
             // Ignore the answer if more was written (or the page changed) while it was being worked out.
             if (_pageIndex.value == index && _pages.value.getOrNull(index)?.items?.size == page.items.size) {
                 _suggestions.value = found
+                _suggestionsStale.value = false
             }
         }
     }
@@ -212,8 +230,7 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
         val size = (letterSize * 0.6f).coerceIn(WORD_SIZE_MIN, WORD_SIZE_MAX)
         val replaced = WordItem(text = word, x = startX, y = startY, size = size, replaced = strokes, angle = angle)
         updatePage(index) { it.copy(items = it.items.dropLast(strokes.size) + replaced, redo = emptyList()) }
-        _suggestions.value = emptyList()
-        suggestJob?.cancel()
+        clearSuggestions()
         scheduleRecognition(index, RECOGNIZE_DELAY_MS)
     }
 
@@ -249,8 +266,9 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
     /** Repairs spelling and grammar in [text] — used by the page and full-screen "Fix" buttons. */
     suspend fun repair(text: String): String = GrammarFixer.fix(context, text)
 
-    /** Every page's text, page after page with a blank line between, ready to copy. */
-    fun combinedText(): String = _pages.value.map { it.text.trim() }.filter { it.isNotEmpty() }.joinToString("\n\n")
+    /** Every page's text as one continuous paragraph (no line break between pages), ready to copy. */
+    fun combinedText(): String =
+        HandwritingRecognizer.joinPieces(_pages.value.map { it.text.trim() }.filter { it.isNotEmpty() }, context)
 
     // --- internals -------------------------------------------------------------------------
 

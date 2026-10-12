@@ -1,6 +1,22 @@
 package com.mobicareapp.ui.handwriting
 
 import android.content.ClipData
+import androidx.core.view.WindowInsetsControllerCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowCompat
+import androidx.compose.ui.window.DialogWindowProvider
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.material3.Surface
+import androidx.compose.material3.CardDefaults
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.WindowInsets
+import android.view.WindowManager
+import android.os.Build
 import android.content.ClipboardManager
 import android.content.Context
 import android.widget.Toast
@@ -99,9 +115,48 @@ private const val INK_WIDTH = 0.0048f
  * one, as many times as needed. The text of all pages together opens in a full-screen preview where
  * it can be corrected and copied.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HandwritingScreen(onBack: () -> Unit) {
+    // Held here (not inside the content) so the phone's Back button, which this window receives, can
+    // close the full preview first and only then leave the notepad.
+    var showPreview by remember { mutableStateOf(false) }
+    // A true full-screen window on top of everything (the app's banner and bottom bar included), with
+    // the phone's own status and navigation bars hidden too, so the writing pad gets all the space.
+    Dialog(
+        onDismissRequest = { if (showPreview) showPreview = false else onBack() },
+        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)
+    ) {
+        FullScreenWindowEffect()
+        Surface(modifier = Modifier.fillMaxSize(), color = PaperColor) {
+            HandwritingContent(onBack = onBack, showPreview = showPreview, onShowPreview = { showPreview = it })
+        }
+    }
+}
+
+/** Hides the status/navigation bars (a swipe from the edge brings them back briefly) and lets the page use the notch area. */
+@Composable
+private fun FullScreenWindowEffect() {
+    val view = LocalView.current
+    DisposableEffect(view) {
+        val window = (view.parent as? DialogWindowProvider)?.window
+        if (window != null) {
+            WindowCompat.setDecorFitsSystemWindows(window, false)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                window.attributes = window.attributes.also {
+                    it.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                }
+            }
+            val controller = WindowCompat.getInsetsController(window, view)
+            controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller.hide(WindowInsetsCompat.Type.systemBars())
+        }
+        onDispose {}
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun HandwritingContent(onBack: () -> Unit, showPreview: Boolean, onShowPreview: (Boolean) -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val viewModel: HandwritingViewModel = viewModel()
@@ -110,6 +165,9 @@ fun HandwritingScreen(onBack: () -> Unit) {
     val model by viewModel.model.collectAsState()
     val busy by viewModel.busy.collectAsState()
     val autoFix by viewModel.autoFix.collectAsState()
+    val suggestions by viewModel.suggestions.collectAsState()
+    val suggestionsStale by viewModel.suggestionsStale.collectAsState()
+    val readError by viewModel.readError.collectAsState()
 
     // The notepad is saved to disk, but locking would still swap this screen out mid-sentence.
     DisposableEffect(Unit) {
@@ -117,9 +175,8 @@ fun HandwritingScreen(onBack: () -> Unit) {
         onDispose { AppLockManager.releaseLockHold() }
     }
 
-    var showPreview by remember { mutableStateOf(false) }
     var previewText by remember { mutableStateOf("") }
-    var panelOpen by remember { mutableStateOf(true) }
+    var panelOpen by remember { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
     var confirmClearPage by remember { mutableStateOf(false) }
     var confirmNewNotepad by remember { mutableStateOf(false) }
@@ -132,17 +189,15 @@ fun HandwritingScreen(onBack: () -> Unit) {
             onTextChange = { previewText = it },
             onFix = { viewModel.repair(it) },
             onRefresh = { previewText = viewModel.combinedText() },
-            onBack = { showPreview = false }
+            onBack = { onShowPreview(false) }
         )
         return
     }
 
-    val page = pages[pageIndex.coerceIn(0, pages.lastIndex)]
     val index = pageIndex.coerceIn(0, pages.lastIndex)
+    val page = pages[index]
     // Nudge towards "Next page" once writing reaches the bottom edge.
     val pageFull = page.lowestY > canvasRatio * 0.9f
-    val suggestions by viewModel.suggestions.collectAsState()
-    val readError by viewModel.readError.collectAsState()
 
     if (confirmClearPage) {
         AlertDialog(
@@ -163,92 +218,134 @@ fun HandwritingScreen(onBack: () -> Unit) {
         )
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("Handwriting  ${index + 1}/${pages.size}") },
-                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, contentDescription = "Back") } },
-                actions = {
-                    IconButton(onClick = { viewModel.undo() }, enabled = page.items.isNotEmpty()) {
-                        Icon(Icons.Default.Undo, contentDescription = "Undo")
-                    }
-                    IconButton(onClick = { viewModel.redo() }, enabled = page.redo.isNotEmpty()) {
-                        Icon(Icons.Default.Redo, contentDescription = "Redo")
-                    }
-                    IconButton(onClick = { previewText = viewModel.combinedText(); showPreview = true }) {
-                        Icon(Icons.Default.Fullscreen, contentDescription = "Full preview")
-                    }
-                    IconButton(onClick = { menuOpen = true }) { Icon(Icons.Default.MoreVert, contentDescription = "More") }
-                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                        DropdownMenuItem(
-                            text = { Text(if (autoFix) "Auto-fix spelling & grammar: ON" else "Auto-fix spelling & grammar: OFF") },
-                            onClick = { menuOpen = false; viewModel.setAutoFix(!autoFix) }
-                        )
-                        DropdownMenuItem(text = { Text("Clear this page") }, onClick = { menuOpen = false; confirmClearPage = true })
-                        DropdownMenuItem(text = { Text("New notepad") }, onClick = { menuOpen = false; confirmNewNotepad = true })
-                    }
+    // Everything outside the pad has a fixed height, and the editing panel floats over the pad
+    // instead of pushing it down, so nothing resizes while writing (no flicker), and the pad gets
+    // all the rest of the screen.
+    Column(modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.displayCutout)) {
+        // Compact toolbar.
+        Row(
+            modifier = Modifier.fillMaxWidth().height(44.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onBack, modifier = Modifier.size(44.dp)) { Icon(Icons.Default.ArrowBack, contentDescription = "Back") }
+            Text("${index + 1} / ${pages.size}", style = MaterialTheme.typography.titleSmall, maxLines = 1)
+            Spacer(Modifier.weight(1f))
+            IconButton(onClick = { viewModel.undo() }, enabled = page.items.isNotEmpty(), modifier = Modifier.size(44.dp)) {
+                Icon(Icons.Default.Undo, contentDescription = "Undo")
+            }
+            IconButton(onClick = { viewModel.redo() }, enabled = page.redo.isNotEmpty(), modifier = Modifier.size(44.dp)) {
+                Icon(Icons.Default.Redo, contentDescription = "Redo")
+            }
+            IconButton(onClick = { previewText = viewModel.combinedText(); onShowPreview(true) }, modifier = Modifier.size(44.dp)) {
+                Icon(Icons.Default.Fullscreen, contentDescription = "Full preview of all pages")
+            }
+            Box {
+                IconButton(onClick = { menuOpen = true }, modifier = Modifier.size(44.dp)) { Icon(Icons.Default.MoreVert, contentDescription = "More") }
+                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    DropdownMenuItem(
+                        text = { Text(if (autoFix) "Auto-fix spelling & grammar: ON" else "Auto-fix spelling & grammar: OFF") },
+                        onClick = { menuOpen = false; viewModel.setAutoFix(!autoFix) }
+                    )
+                    DropdownMenuItem(text = { Text("Clear this page") }, onClick = { menuOpen = false; confirmClearPage = true })
+                    DropdownMenuItem(text = { Text("New notepad") }, onClick = { menuOpen = false; confirmNewNotepad = true })
                 }
-            )
+            }
         }
-    ) { padding ->
-        Column(modifier = Modifier.fillMaxSize().padding(padding)) {
-            when (val state = model) {
-                is ModelState.Checking, is ModelState.Downloading -> {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            if (state is ModelState.Downloading) "Downloading the English handwriting model (one time)…" else "Preparing handwriting…",
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                    }
+
+        // One line showing what has been read so far (its end, where the newest writing lands); tap to open the editor.
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(36.dp)
+                .clickable { panelOpen = !panelOpen }
+                .padding(horizontal = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            val strip = when (val state = model) {
+                is ModelState.Checking -> "Preparing handwriting…"
+                is ModelState.Downloading -> "Downloading the English handwriting model (one time)…"
+                is ModelState.Failed -> state.message
+                is ModelState.Ready -> page.text.replace('\n', ' ').trim().let { if (it.length > 70) "…" + it.takeLast(70) else it }
+                    .ifEmpty { "Your handwriting appears here as text" }
+            }
+            Text(
+                strip,
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (model is ModelState.Failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            // Always takes its 16dp, spinning or not, so the text beside it never shifts.
+            Box(modifier = Modifier.size(16.dp)) {
+                if (busy || fixingPage || model is ModelState.Checking || model is ModelState.Downloading) {
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
                 }
-                is ModelState.Failed -> {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(state.message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.weight(1f))
-                        TextButton(onClick = { viewModel.prepareModel() }) { Text("Retry") }
-                    }
+            }
+            Icon(if (panelOpen) Icons.Default.ExpandLess else Icons.Default.ExpandMore, contentDescription = if (panelOpen) "Close editor" else "Edit text")
+        }
+
+        // Word suggestions. The previous ones stay (dimmed, not tappable) while the newest writing is
+        // being read, instead of disappearing and reappearing on every stroke, which looked like blinking.
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(44.dp)
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            if (suggestions.isEmpty()) {
+                Text(
+                    "Write 2-3 letters of a word: suggested words appear here",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                suggestions.forEach { word ->
+                    SuggestionChip(
+                        onClick = { viewModel.pickSuggestion(word) },
+                        enabled = !suggestionsStale,
+                        label = { Text(word, style = MaterialTheme.typography.titleMedium) }
+                    )
                 }
-                is ModelState.Ready -> {}
+            }
+        }
+
+        // The writing pad: everything that's left of the screen.
+        Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+            HandwritingCanvas(
+                items = page.items,
+                onStroke = { viewModel.addStroke(it) },
+                onSize = { ratio -> canvasRatio = ratio },
+                modifier = Modifier.fillMaxSize()
+            )
+
+            readError?.let { message ->
+                Text(
+                    "Couldn't read the handwriting: $message",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.align(Alignment.BottomStart).padding(8.dp)
+                )
             }
 
-            // The text read from this page — a pop-down panel, editable, so a misread word can be fixed right here.
-            Card(modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)) {
-                Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().clickable { panelOpen = !panelOpen },
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("Text from this page", style = MaterialTheme.typography.labelLarge, modifier = Modifier.weight(1f))
-                        if (busy || fixingPage) {
-                            CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
-                            Spacer(Modifier.width(6.dp))
-                            Text("Reading…", style = MaterialTheme.typography.bodySmall)
-                        }
-                        Icon(if (panelOpen) Icons.Default.ExpandLess else Icons.Default.ExpandMore, contentDescription = if (panelOpen) "Hide" else "Show")
-                    }
-                    if (panelOpen) {
+            // The editor floats over the top of the pad (it doesn't push the pad down).
+            if (panelOpen) {
+                Card(
+                    modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(horizontal = 8.dp),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
+                ) {
+                    Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
                         OutlinedTextField(
                             value = page.text,
                             onValueChange = { viewModel.setPageText(index, it) },
                             placeholder = { Text("Your handwriting appears here as text…") },
-                            minLines = 2,
-                            maxLines = 4,
+                            minLines = 3,
+                            maxLines = 5,
                             modifier = Modifier.fillMaxWidth()
                         )
-                        readError?.let { message ->
-                            Text(
-                                "Couldn't read the handwriting: $message",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.error
-                            )
-                        }
                         if (page.textEdited) {
                             Text(
                                 "Edited by hand — new writing won't change this text. Tap Re-read to read the handwriting again.",
@@ -273,7 +370,7 @@ fun HandwritingScreen(onBack: () -> Unit) {
                                 Spacer(Modifier.width(4.dp))
                                 Text("Fix")
                             }
-                            // Reads the handwriting right now (it normally happens a moment after the pen stops).
+                            // Reads the handwriting right now (it normally happens a moment after each stroke).
                             TextButton(enabled = page.items.isNotEmpty() && !busy, onClick = { viewModel.readNow(index) }) {
                                 Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
                                 Spacer(Modifier.width(4.dp))
@@ -285,84 +382,46 @@ fun HandwritingScreen(onBack: () -> Unit) {
                                 Text("Copy")
                             }
                             if (page.textEdited) {
-                                TextButton(onClick = { viewModel.rereadPage(index) }) {
-                                    Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                                    Spacer(Modifier.width(4.dp))
-                                    Text("Re-read")
-                                }
+                                TextButton(onClick = { viewModel.rereadPage(index) }) { Text("Re-read") }
                             }
+                            Spacer(Modifier.weight(1f))
+                            TextButton(onClick = { panelOpen = false }) { Text("Done") }
                         }
                     }
                 }
             }
+        }
 
-            // Word suggestions for the word being written. Always takes the same height, so the pad
-            // below doesn't jump up and down as suggestions come and go.
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(52.dp)
-                    .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                if (suggestions.isEmpty()) {
-                    Text(
-                        "Write 2-3 letters of a word — suggested words appear here. Tap one to finish the word.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                } else {
-                    suggestions.forEach { word ->
-                        SuggestionChip(
-                            onClick = { viewModel.pickSuggestion(word) },
-                            label = { Text(word, style = MaterialTheme.typography.titleMedium) }
-                        )
-                    }
-                }
+        // Page navigation.
+        Row(
+            modifier = Modifier.fillMaxWidth().height(48.dp).padding(horizontal = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            OutlinedButton(onClick = { viewModel.previousPage() }, enabled = index > 0) {
+                Icon(Icons.Default.ArrowBack, contentDescription = "Previous page", modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("Prev", maxLines = 1)
             }
-
-            // The writing pad itself: fills all the space that's left.
-            Box(modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 8.dp)) {
-                HandwritingCanvas(
-                    items = page.items,
-                    onStroke = { viewModel.addStroke(it) },
-                    onSize = { ratio -> canvasRatio = ratio },
-                    modifier = Modifier.fillMaxSize()
-                )
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                OutlinedButton(onClick = { viewModel.previousPage() }, enabled = index > 0) {
-                    Icon(Icons.Default.ArrowBack, contentDescription = "Previous page", modifier = Modifier.size(18.dp))
+            Text(
+                "Page ${index + 1} of ${pages.size}",
+                style = MaterialTheme.typography.labelLarge,
+                maxLines = 1,
+                modifier = Modifier.weight(1f),
+                textAlign = TextAlign.Center
+            )
+            // Filled when the page is full, plain otherwise; it works either way (on the last page it adds a new one).
+            if (pageFull) {
+                Button(onClick = { viewModel.nextPage() }) {
+                    Text("Next", maxLines = 1)
                     Spacer(Modifier.width(4.dp))
-                    Text("Prev", maxLines = 1)
+                    Icon(Icons.Default.ArrowForward, contentDescription = null, modifier = Modifier.size(18.dp))
                 }
-                Text(
-                    "Page ${index + 1} of ${pages.size}",
-                    style = MaterialTheme.typography.labelLarge,
-                    maxLines = 1,
-                    modifier = Modifier.weight(1f),
-                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                )
-                // Filled and relabelled when the page is full, plain otherwise — it works either way (on the last page it adds a new one).
-                if (pageFull) {
-                    Button(onClick = { viewModel.nextPage() }) {
-                        Text("Next", maxLines = 1)
-                        Spacer(Modifier.width(4.dp))
-                        Icon(Icons.Default.ArrowForward, contentDescription = null, modifier = Modifier.size(18.dp))
-                    }
-                } else {
-                    OutlinedButton(onClick = { viewModel.nextPage() }) {
-                        Text("Next", maxLines = 1)
-                        Spacer(Modifier.width(4.dp))
-                        Icon(Icons.Default.ArrowForward, contentDescription = null, modifier = Modifier.size(18.dp))
-                    }
+            } else {
+                OutlinedButton(onClick = { viewModel.nextPage() }) {
+                    Text("Next", maxLines = 1)
+                    Spacer(Modifier.width(4.dp))
+                    Icon(Icons.Default.ArrowForward, contentDescription = null, modifier = Modifier.size(18.dp))
                 }
             }
         }
