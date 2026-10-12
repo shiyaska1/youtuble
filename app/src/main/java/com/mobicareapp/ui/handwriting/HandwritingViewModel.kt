@@ -9,6 +9,7 @@ import com.mobicareapp.handwriting.HandwritingStore
 import com.mobicareapp.handwriting.HwPage
 import com.mobicareapp.handwriting.HwStroke
 import com.mobicareapp.handwriting.InkItem
+import com.mobicareapp.handwriting.InkLayout
 import com.mobicareapp.handwriting.PageItem
 import com.mobicareapp.handwriting.WordItem
 import com.mobicareapp.handwriting.WordSuggester
@@ -173,9 +174,9 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
             delay(SUGGEST_DELAY_MS)
             if (_model.value !is ModelState.Ready) return@launch
             val page = _pages.value.getOrNull(index) ?: return@launch
-            val strokes = currentWordStrokes(page.items)
-            if (strokes.isEmpty()) return@launch
-            val candidates = runCatching { HandwritingRecognizer.candidatesFor(strokes) }
+            val word = InkLayout.currentWord(page.items)
+            if (word == null || word.strokes.isEmpty()) return@launch
+            val candidates = runCatching { HandwritingRecognizer.candidatesFor(word) }
                 .onFailure { _readError.value = it.message ?: it.javaClass.simpleName }
                 .getOrNull() ?: return@launch
             val found = withContext(Dispatchers.Default) { WordSuggester.suggest(context, candidates) }
@@ -186,57 +187,30 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
-    /**
-     * The strokes of the word being written: the latest strokes, going backwards while each earlier
-     * stroke is on the same line and not separated from the word by a word-sized gap. A finished
-     * (suggestion-completed) word, or a big gap, ends it.
-     */
-    private fun currentWordStrokes(items: List<PageItem>): List<HwStroke> {
-        val word = mutableListOf<HwStroke>()
-        for (item in items.asReversed()) {
-            if (item !is InkItem) break
-            val stroke = item.stroke
-            if (word.isNotEmpty()) {
-                val wordLeft = word.minOf { it.minX }
-                val wordRight = word.maxOf { it.maxX }
-                val gap = if (stroke.maxX < wordLeft) wordLeft - stroke.maxX else if (stroke.minX > wordRight) stroke.minX - wordRight else 0f
-                val onSameLine = HandwritingRecognizer.sameLine(
-                    word.minOf { it.minY }, word.maxOf { it.maxY }, stroke.minY, stroke.maxY
-                )
-                // The gap that separates words grows with the writing: someone writing big letters leaves
-                // wider gaps between the letters of one word than a person writing small.
-                val letterSize = typicalLetterSize(word + stroke)
-                if (gap > maxOf(WORD_GAP, WORD_GAP_PER_LETTER * letterSize) || !onSameLine) break
-            }
-            word += stroke
-        }
-        return word.asReversed()
-    }
-
-    /** Median height of the strokes, ignoring dots and tiny marks — a measure of how big this person writes. */
-    private fun typicalLetterSize(strokes: List<HwStroke>): Float {
-        val heights = strokes.map { it.maxY - it.minY }.filter { it > 0.02f }.sorted()
-        return if (heights.isEmpty()) 0.05f else heights[heights.size / 2]
-    }
-
     /** The writer tapped a suggestion: the half-written word's strokes are swapped for the full word. */
     fun pickSuggestion(word: String) {
         val index = _pageIndex.value
         val page = _pages.value.getOrNull(index) ?: return
-        val strokes = currentWordStrokes(page.items)
+        val current = InkLayout.currentWord(page.items) ?: return
+        val strokes = current.strokes
         if (strokes.isEmpty()) return
-        val left = strokes.minOf { it.minX }
-        val bottom = strokes.maxOf { it.maxY }
+        val angle = current.angle
+        val c = kotlin.math.cos(angle)
+        val s = kotlin.math.sin(angle)
+
+        // In the writing's own frame, "along" runs in the direction of writing and "down" is across it.
+        // The word starts at the first letter's left edge and sits on the baseline, taken as the
+        // typical bottom of the strokes (so a few descending letters like y or p don't drag it down).
+        val alongStart = strokes.minOf { st -> st.points.minOf { it.x * c + it.y * s } }
+        val bottoms = strokes.map { st -> st.points.maxOf { -it.x * s + it.y * c } }.sorted()
+        val baseline = bottoms[bottoms.size / 2]
+        val startX = alongStart * c - baseline * s
+        val startY = alongStart * s + baseline * c
+
+        val letterSize = InkLayout.typicalSize(strokes.map { InkLayout.Element(InkItem(it)) })
         // Set the finished word about as big as the letters it replaces (within sensible limits).
-        val size = (typicalLetterSize(strokes) * 0.6f).coerceIn(WORD_SIZE_MIN, WORD_SIZE_MAX)
-        val replaced = WordItem(
-            text = word,
-            x = left,
-            // Text sits with its baseline at the bottom of the letters that were written.
-            y = bottom - size * 0.95f,
-            size = size,
-            replaced = strokes
-        )
+        val size = (letterSize * 0.6f).coerceIn(WORD_SIZE_MIN, WORD_SIZE_MAX)
+        val replaced = WordItem(text = word, x = startX, y = startY, size = size, replaced = strokes, angle = angle)
         updatePage(index) { it.copy(items = it.items.dropLast(strokes.size) + replaced, redo = emptyList()) }
         _suggestions.value = emptyList()
         suggestJob?.cancel()
@@ -291,11 +265,18 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
             if (page.textEdited) return@launch
             _busy.value = true
             try {
-                var text = HandwritingRecognizer.recognize(page.items)
-                if (_autoFix.value && text.isNotBlank()) text = GrammarFixer.fix(context, text)
+                val text = HandwritingRecognizer.recognize(page.items)
                 // Only store the result if the page wasn't edited by hand while this was running.
                 updatePage(index) { current -> if (current.textEdited) current else current.copy(text = text) }
                 _readError.value = null
+                _busy.value = false
+                if (_autoFix.value && text.isNotBlank()) {
+                    // Cancelled (and so skipped) if another stroke arrives during the wait.
+                    delay(AUTO_FIX_IDLE_MS)
+                    _busy.value = true
+                    val fixed = GrammarFixer.fix(context, text)
+                    updatePage(index) { current -> if (current.textEdited) current else current.copy(text = fixed) }
+                }
             } catch (e: Exception) {
                 // A failed reading leaves the old text; the next stroke tries again.
                 _readError.value = e.message ?: e.javaClass.simpleName
@@ -325,17 +306,18 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     private companion object {
-        /** Quiet time after the last stroke before the page is read — long enough that pausing between words doesn't trigger a half-read. */
-        const val RECOGNIZE_DELAY_MS = 1200L
+        /** Quiet time after a stroke before the page is read again: short, so the preview follows the writing stroke by stroke. */
+        const val RECOGNIZE_DELAY_MS = 350L
+
+        /**
+         * Spelling/grammar repair waits for this much quiet. While writing, the preview shows the
+         * raw reading - a repair would quietly fix the very character the writer wants to notice
+         * and Undo - and a repair per stroke would also hammer the free grammar service.
+         */
+        const val AUTO_FIX_IDLE_MS = 3000L
 
         /** Shorter wait before suggestions appear, so they're there while the writer is still deciding about the word. */
         const val SUGGEST_DELAY_MS = 450L
-
-        /** A gap wider than this (in page widths) between strokes means a new word has started — for small writing; bigger writing allows proportionally bigger gaps. */
-        const val WORD_GAP = 0.035f
-
-        /** Gaps up to this many letter-heights still belong to the same word. */
-        const val WORD_GAP_PER_LETTER = 0.9f
 
         /** Limits (in page widths) for the font size of a completed word. */
         const val WORD_SIZE_MIN = 0.045f

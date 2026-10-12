@@ -68,6 +68,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
@@ -86,16 +87,12 @@ import com.mobicareapp.handwriting.InkPt
 import kotlinx.coroutines.launch
 
 private val PaperColor = Color(0xFFFFFDF6)
-private val RuleColor = Color(0xFFBBD6EC)
-private val MarginColor = Color(0xFFEBA8A8)
 private val InkColor = Color(0xFF14213D)
 
-/** Distance between the ruled lines, in page widths — wide enough to write comfortably with a finger. */
-private const val RULE_SPACING = 0.09f
 private const val INK_WIDTH = 0.0048f
 
 /**
- * A full-screen notepad for English handwriting: write with a finger or stylus on ruled paper, and
+ * A full-screen notepad for English handwriting: write with a finger or stylus on plain paper, in any direction, and
  * the handwriting is read into text (shown in the panel at the top, editable) with spelling and
  * grammar repaired. Undo/Redo step through strokes; when a page fills up, "Next page" starts a fresh
  * one, as many times as needed. The text of all pages together opens in a full-screen preview where
@@ -370,7 +367,7 @@ fun HandwritingScreen(onBack: () -> Unit) {
     }
 }
 
-/** Ruled paper that records strokes (one finger or stylus) and draws them as smooth curves. */
+/** Plain paper that records strokes (one finger or stylus) and draws them as smooth curves. */
 @Composable
 private fun HandwritingCanvas(
     items: List<PageItem>,
@@ -411,25 +408,24 @@ private fun HandwritingCanvas(
                 }
             }
     ) {
-        val spacing = size.width * RULE_SPACING
-        var y = spacing
-        while (y < size.height) {
-            drawLine(RuleColor, Offset(0f, y), Offset(size.width, y), strokeWidth = 1.5f)
-            y += spacing
-        }
-        drawLine(MarginColor, Offset(size.width * 0.1f, 0f), Offset(size.width * 0.1f, size.height), strokeWidth = 2f)
-
         val inkWidth = size.width * INK_WIDTH
         items.forEach { item ->
             when (item) {
                 is InkItem -> drawInk(item.stroke.points.map { Offset(it.x * size.width, it.y * size.width) }, inkWidth)
                 // A word completed from a suggestion, set in a handwriting-style font where the unfinished word was.
-                is WordItem -> drawText(
-                    textMeasurer = textMeasurer,
-                    text = item.text,
-                    topLeft = Offset(item.x * size.width, item.y * size.width),
-                    style = TextStyle(fontSize = (item.size * size.width * 1.15f).toSp(), fontFamily = FontFamily.Cursive, color = InkColor)
-                )
+                is WordItem -> {
+                    val layout = textMeasurer.measure(
+                        item.text,
+                        TextStyle(fontSize = (item.size * size.width * 1.15f).toSp(), fontFamily = FontFamily.Cursive, color = InkColor)
+                    )
+                    // The word starts at its baseline's left end and runs at the same angle as the writing it replaced.
+                    withTransform({
+                        translate(item.x * size.width, item.y * size.width)
+                        rotate(Math.toDegrees(item.angle.toDouble()).toFloat(), Offset.Zero)
+                    }) {
+                        drawText(layout, topLeft = Offset(0f, -layout.firstBaseline))
+                    }
+                }
             }
         }
         drawInk(live, inkWidth)

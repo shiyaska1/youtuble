@@ -27,14 +27,25 @@ data class InkItem(val stroke: HwStroke) : PageItem
 
 /**
  * A word the writer completed by tapping a suggestion instead of writing all of it. It is drawn in
- * a handwriting-style font where the unfinished word was; [replaced] keeps the strokes it stands in
- * for, so Undo can give the half-written word back. [x]/[y] are the top-left of the text and
- * [size] its font size, all in page widths.
+ * a handwriting-style font where the unfinished word was, running at the same [angle] as the
+ * writing around it; [replaced] keeps the strokes it stands in for, so Undo can give the
+ * half-written word back. ([x], [y]) is where the word's baseline starts, [size] its font size, all
+ * in page widths; [angle] is in radians, 0 meaning left to right.
  */
-data class WordItem(val text: String, val x: Float, val y: Float, val size: Float, val replaced: List<HwStroke>) : PageItem {
+data class WordItem(
+    val text: String,
+    val x: Float,
+    val y: Float,
+    val size: Float,
+    val replaced: List<HwStroke>,
+    val angle: Float = 0f
+) : PageItem {
     /** Rough width, only used to tell where this word sits among neighbouring handwriting. */
     val width: Float get() = text.length * size * 0.5f
-    val centreY: Float get() = y + size * 0.6f
+
+    /** Roughly the middle of the word on the page. */
+    val centreX: Float get() = x + kotlin.math.cos(angle) * width / 2f + kotlin.math.sin(angle) * size * 0.4f
+    val centreY: Float get() = y + kotlin.math.sin(angle) * width / 2f - kotlin.math.cos(angle) * size * 0.4f
 }
 
 /**
@@ -54,7 +65,7 @@ data class HwPage(
         get() = items.maxOfOrNull { item ->
             when (item) {
                 is InkItem -> item.stroke.maxY
-                is WordItem -> item.y + item.size * 1.2f
+                is WordItem -> maxOf(item.y, item.centreY) + item.size * 0.6f
             }
         } ?: 0f
 }
@@ -104,6 +115,7 @@ object HandwritingStore {
             .put("x", item.x.toDouble())
             .put("y", item.y.toDouble())
             .put("z", item.size.toDouble())
+            .put("a", item.angle.toDouble())
             .put("r", JSONArray().also { arr -> item.replaced.forEach { arr.put(strokeToJson(it)) } })
     }
 
@@ -115,6 +127,7 @@ object HandwritingStore {
                 x = obj.getDouble("x").toFloat(),
                 y = obj.getDouble("y").toFloat(),
                 size = obj.getDouble("z").toFloat(),
+                angle = obj.optDouble("a", 0.0).toFloat(),
                 replaced = (0 until replaced.length()).map { strokeFromJson(replaced.getJSONArray(it)) }
             )
         } else {
