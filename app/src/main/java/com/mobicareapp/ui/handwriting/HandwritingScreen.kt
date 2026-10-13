@@ -214,8 +214,8 @@ private fun HandwritingContent(onBack: () -> Unit, showPreview: Boolean, onShowP
     var showInsertSnippet by remember { mutableStateOf(false) }
 
     // A photo from the gallery goes in behind the writing, fitted to the whole pad.
-    val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-        if (uri != null) viewModel.insertImage(uri)
+    val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(20)) { uris ->
+        if (uris.isNotEmpty()) viewModel.insertImages(uris)
     }
 
     // "Download": every page stacked top to bottom as one tall PNG, saved wherever the user chooses.
@@ -394,7 +394,7 @@ private fun HandwritingContent(onBack: () -> Unit, showPreview: Boolean, onShowP
                         onClick = { menuOpen = false; showInsertSnippet = true }
                     )
                     DropdownMenuItem(
-                        text = { Text("Insert a picture from the gallery…") },
+                        text = { Text("Insert pictures from the gallery (one per page)…") },
                         onClick = {
                             menuOpen = false
                             AppLockManager.suppressNextLock()

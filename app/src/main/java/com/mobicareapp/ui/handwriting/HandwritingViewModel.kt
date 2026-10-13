@@ -327,17 +327,34 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
 
     // --- picture from the gallery ---------------------------------------------------------------
 
-    /** Puts a gallery photo on the current page, scaled to fit the whole pad, behind the writing. */
-    fun insertImage(uri: Uri) {
-        val index = _pageIndex.value
+    /**
+     * Puts gallery pictures on the pad, each scaled to fit a whole page, behind the writing. The
+     * first goes on the current page; every further picture gets a page of its own, added right after
+     * the one before it (pages that were already there are pushed further along, not overwritten).
+     */
+    fun insertImages(uris: List<Uri>) {
+        if (uris.isEmpty()) return
+        val startIndex = _pageIndex.value
         viewModelScope.launch {
-            val path = withContext(Dispatchers.IO) { runCatching { copyDownscaled(uri) }.getOrNull() }
-            if (path == null) {
+            val paths = withContext(Dispatchers.IO) { uris.mapNotNull { uri -> runCatching { copyDownscaled(uri) }.getOrNull() } }
+            if (paths.isEmpty()) {
                 _readError.value = "Couldn't open that picture"
                 return@launch
             }
-            _pages.value.getOrNull(index)?.imagePath?.let { old -> File(old).delete() }
-            updatePage(index) { it.copy(imagePath = path) }
+            // Picture one replaces any picture already on this page.
+            _pages.value.getOrNull(startIndex)?.imagePath?.let { old -> File(old).delete() }
+            _pages.update { pages ->
+                val result = pages.toMutableList()
+                result[startIndex] = result[startIndex].copy(imagePath = paths.first())
+                paths.drop(1).forEachIndexed { i, path -> result.add(startIndex + 1 + i, HwPage(imagePath = path)) }
+                result
+            }
+            persist()
+            // New pages shifted the ones after them, so any reading that was waiting is redone for the right page.
+            recognizeJobs.values.forEach { it.cancel() }
+            recognizeJobs.clear()
+            _pages.value.forEachIndexed { i, page -> if (page.items.isNotEmpty() && !page.textEdited) scheduleRecognition(i, 0) }
+            if (paths.size < uris.size) _readError.value = "${uris.size - paths.size} picture(s) couldn't be opened"
         }
     }
 
