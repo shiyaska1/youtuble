@@ -316,6 +316,11 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
         scheduleRecognition(index, 0)
     }
 
+    /** Inserts each of [snippets] in turn, every one below the previous, then everything is read. */
+    fun insertSnippets(snippets: List<HwSnippet>) {
+        snippets.forEach { insertSnippet(it) }
+    }
+
     private fun persistSnippets() {
         viewModelScope.launch(Dispatchers.IO) { HandwritingStore.saveSnippets(context, _snippets.value) }
     }

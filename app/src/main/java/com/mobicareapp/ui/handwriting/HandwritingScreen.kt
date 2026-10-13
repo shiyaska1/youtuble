@@ -1,6 +1,12 @@
 package com.mobicareapp.ui.handwriting
 
 import android.content.ClipData
+import java.io.FileOutputStream
+import java.io.File
+import com.mobicareapp.upload.PersonalServerUploader
+import com.mobicareapp.upload.PersonalServerSettings
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.material3.Checkbox
 import java.util.Locale
 import java.util.Date
 import java.text.SimpleDateFormat
@@ -203,6 +209,7 @@ private fun HandwritingContent(onBack: () -> Unit, showPreview: Boolean, onShowP
     var fixingPage by remember { mutableStateOf(false) }
     var canvasRatio by remember { mutableStateOf(1.8f) }
     val snippets by viewModel.snippets.collectAsState()
+    var uploadMessage by remember { mutableStateOf<String?>(null) }
     var showSaveSnippet by remember { mutableStateOf(false) }
     var showInsertSnippet by remember { mutableStateOf(false) }
 
@@ -232,6 +239,44 @@ private fun HandwritingContent(onBack: () -> Unit, showPreview: Boolean, onShowP
         }
     }
 
+    // "Upload to my server": all pages stacked into one picture, sent to the same 1.jpg slot the
+    // Transcribe screen uses, and the web address is copied to the clipboard.
+    fun uploadAllPages() {
+        if (!PersonalServerSettings.isConfigured(context)) {
+            Toast.makeText(
+                context,
+                "Set up your server under \"Copy images/videos to clipboard\" in Record first.",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+        Toast.makeText(context, "Uploading all pages…", Toast.LENGTH_SHORT).show()
+        scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val bitmap = viewModel.renderAllPages()
+                    val file = File(context.cacheDir, "handwriting_upload.jpg")
+                    try {
+                        FileOutputStream(file).use { out -> bitmap.compress(Bitmap.CompressFormat.JPEG, 92, out) }
+                        PersonalServerUploader.uploadFile(context, file, "image/jpeg", isVideo = false).getOrThrow()
+                    } finally {
+                        bitmap.recycle()
+                        file.delete()
+                    }
+                }
+            }
+            result
+                .onSuccess {
+                    val folder = (PersonalServerSettings.getUploadUrl(context) ?: "").substringBeforeLast('/')
+                    val message = "Uploaded to the following URL(s):\nImage: $folder/1.jpg"
+                    context.getSystemService(ClipboardManager::class.java)
+                        .setPrimaryClip(ClipData.newPlainText("Uploaded URL", message))
+                    uploadMessage = message
+                }
+                .onFailure { e -> uploadMessage = "Upload failed: ${e.message ?: "unknown error"}" }
+        }
+    }
+
     if (showPreview) {
         HandwritingPreviewScreen(
             text = previewText,
@@ -251,6 +296,29 @@ private fun HandwritingContent(onBack: () -> Unit, showPreview: Boolean, onShowP
     // Nudge towards "Next page" once writing reaches the bottom edge.
     val pageFull = page.lowestY > canvasRatio * 0.9f
 
+    uploadMessage?.let { message ->
+        AlertDialog(
+            onDismissRequest = { uploadMessage = null },
+            title = { Text(if (message.startsWith("Uploaded")) "Uploaded" else "Upload") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(message, style = MaterialTheme.typography.bodyMedium)
+                    if (message.startsWith("Uploaded")) {
+                        Text("The address is already copied.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { uploadMessage = null }) { Text("OK") } },
+            dismissButton = {
+                if (message.startsWith("Uploaded")) {
+                    TextButton(onClick = {
+                        context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Uploaded URL", message))
+                        Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
+                    }) { Text("Copy again") }
+                }
+            }
+        )
+    }
     if (showSaveSnippet) {
         SaveSnippetDialog(
             onSave = { title ->
@@ -264,7 +332,7 @@ private fun HandwritingContent(onBack: () -> Unit, showPreview: Boolean, onShowP
     if (showInsertSnippet) {
         InsertSnippetDialog(
             snippets = snippets,
-            onInsert = { snippet -> showInsertSnippet = false; viewModel.insertSnippet(snippet) },
+            onInsert = { chosen -> showInsertSnippet = false; viewModel.insertSnippets(chosen) },
             onDelete = { viewModel.deleteSnippet(it.id) },
             onDismiss = { showInsertSnippet = false }
         )
@@ -343,6 +411,10 @@ private fun HandwritingContent(onBack: () -> Unit, showPreview: Boolean, onShowP
                             AppLockManager.suppressNextLock()
                             exportLauncher.launch("Handwriting_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".png")
                         }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Upload all pages to my server (1.jpg)") },
+                        onClick = { menuOpen = false; uploadAllPages() }
                     )
                     DropdownMenuItem(text = { Text("Clear this page") }, onClick = { menuOpen = false; confirmClearPage = true })
                     DropdownMenuItem(text = { Text("New notepad") }, onClick = { menuOpen = false; confirmNewNotepad = true })
@@ -556,12 +628,14 @@ private fun SaveSnippetDialog(onSave: (String) -> Unit, onDismiss: () -> Unit) {
 @Composable
 private fun InsertSnippetDialog(
     snippets: List<HwSnippet>,
-    onInsert: (HwSnippet) -> Unit,
+    onInsert: (List<HwSnippet>) -> Unit,
     onDelete: (HwSnippet) -> Unit,
     onDismiss: () -> Unit
 ) {
     var query by remember { mutableStateOf("") }
     var pendingDelete by remember { mutableStateOf<HwSnippet?>(null) }
+    // Ticked saved writings, in the order they were ticked (that's the order they go onto the page).
+    val ticked = remember { mutableStateListOf<Long>() }
     val matches = snippets.filter { it.title.contains(query.trim(), ignoreCase = true) }
 
     pendingDelete?.let { snippet ->
@@ -579,6 +653,7 @@ private fun InsertSnippetDialog(
         title = { Text("Insert saved writing") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Tick the ones to put on this page, then tap Insert.", style = MaterialTheme.typography.bodySmall)
                 OutlinedTextField(
                     value = query,
                     onValueChange = { query = it },
@@ -593,10 +668,13 @@ private fun InsertSnippetDialog(
                 } else {
                     LazyColumn(modifier = Modifier.heightIn(max = 320.dp)) {
                         items(matches, key = { it.id }) { snippet ->
+                            val isTicked = snippet.id in ticked
+                            val toggle = { if (isTicked) ticked.remove(snippet.id) else ticked.add(snippet.id) }
                             Row(
-                                modifier = Modifier.fillMaxWidth().clickable { onInsert(snippet) }.padding(vertical = 6.dp),
+                                modifier = Modifier.fillMaxWidth().clickable { toggle() }.padding(vertical = 2.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
+                                Checkbox(checked = isTicked, onCheckedChange = { toggle() })
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(snippet.title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     if (snippet.text.isNotBlank()) {
@@ -609,7 +687,7 @@ private fun InsertSnippetDialog(
                                         )
                                     }
                                 }
-                                IconButton(onClick = { pendingDelete = snippet }) {
+                                IconButton(onClick = { ticked.remove(snippet.id); pendingDelete = snippet }) {
                                     Icon(Icons.Default.Delete, contentDescription = "Delete")
                                 }
                             }
@@ -618,7 +696,12 @@ private fun InsertSnippetDialog(
                 }
             }
         },
-        confirmButton = {},
+        confirmButton = {
+            TextButton(
+                enabled = ticked.isNotEmpty(),
+                onClick = { onInsert(ticked.mapNotNull { id -> snippets.firstOrNull { it.id == id } }) }
+            ) { Text(if (ticked.isEmpty()) "Insert" else "Insert (${ticked.size})") }
+        },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Close") } }
     )
 }
