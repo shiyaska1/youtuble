@@ -141,20 +141,34 @@ private const val INK_WIDTH = 0.0048f
  * one, as many times as needed. The text of all pages together opens in a full-screen preview where
  * it can be corrected and copied.
  */
+/** What fills the full-screen window instead of the writing pad. */
+internal sealed interface HwOverlay {
+    data object None : HwOverlay
+    data object Preview : HwOverlay
+    data object NotesList : HwOverlay
+    data class NoteDetail(val id: Long) : HwOverlay
+}
+
 @Composable
 fun HandwritingScreen(onBack: () -> Unit) {
     // Held here (not inside the content) so the phone's Back button, which this window receives, can
-    // close the full preview first and only then leave the notepad.
-    var showPreview by remember { mutableStateOf(false) }
+    // step back one screen at a time: note -> list -> pad -> out of the notepad.
+    var overlay by remember { mutableStateOf<HwOverlay>(HwOverlay.None) }
     // A true full-screen window on top of everything (the app's banner and bottom bar included), with
     // the phone's own status and navigation bars hidden too, so the writing pad gets all the space.
     Dialog(
-        onDismissRequest = { if (showPreview) showPreview = false else onBack() },
+        onDismissRequest = {
+            when (overlay) {
+                is HwOverlay.NoteDetail -> overlay = HwOverlay.NotesList
+                HwOverlay.None -> onBack()
+                else -> overlay = HwOverlay.None
+            }
+        },
         properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)
     ) {
         FullScreenWindowEffect()
         Surface(modifier = Modifier.fillMaxSize(), color = PaperColor) {
-            HandwritingContent(onBack = onBack, showPreview = showPreview, onShowPreview = { showPreview = it })
+            HandwritingContent(onBack = onBack, overlay = overlay, onOverlay = { overlay = it })
         }
     }
 }
@@ -182,7 +196,7 @@ private fun FullScreenWindowEffect() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun HandwritingContent(onBack: () -> Unit, showPreview: Boolean, onShowPreview: (Boolean) -> Unit) {
+private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay: (HwOverlay) -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val viewModel: HandwritingViewModel = viewModel()
@@ -194,6 +208,7 @@ private fun HandwritingContent(onBack: () -> Unit, showPreview: Boolean, onShowP
     val suggestions by viewModel.suggestions.collectAsState()
     val suggestionsStale by viewModel.suggestionsStale.collectAsState()
     val readError by viewModel.readError.collectAsState()
+    val currentNoteId by viewModel.currentNoteId.collectAsState()
 
     // The notepad is saved to disk, but locking would still swap this screen out mid-sentence.
     DisposableEffect(Unit) {
@@ -277,15 +292,36 @@ private fun HandwritingContent(onBack: () -> Unit, showPreview: Boolean, onShowP
         }
     }
 
-    if (showPreview) {
-        HandwritingPreviewScreen(
-            text = previewText,
-            onTextChange = { previewText = it },
-            onFix = { viewModel.repair(it) },
-            onRefresh = { previewText = viewModel.combinedText() },
-            onBack = { onShowPreview(false) }
-        )
-        return
+    when (overlay) {
+        HwOverlay.Preview -> {
+            HandwritingPreviewScreen(
+                text = previewText,
+                onTextChange = { previewText = it },
+                onFix = { viewModel.repair(it) },
+                onRefresh = { previewText = viewModel.combinedText() },
+                onBack = { onOverlay(HwOverlay.None) }
+            )
+            return
+        }
+        HwOverlay.NotesList -> {
+            NotesListScreen(
+                viewModel = viewModel,
+                onBack = { onOverlay(HwOverlay.None) },
+                onOpen = { note -> onOverlay(HwOverlay.NoteDetail(note.id)) }
+            )
+            return
+        }
+        is HwOverlay.NoteDetail -> {
+            NoteDetailScreen(
+                viewModel = viewModel,
+                noteId = overlay.id,
+                padHasWriting = pages.any { it.items.isNotEmpty() || it.imagePath != null },
+                onBack = { onOverlay(HwOverlay.NotesList) },
+                onOpenOnPad = { viewModel.openNote(overlay.id) { onOverlay(HwOverlay.None) } }
+            )
+            return
+        }
+        HwOverlay.None -> {}
     }
 
     val index = pageIndex.coerceIn(0, pages.lastIndex)
@@ -374,7 +410,7 @@ private fun HandwritingContent(onBack: () -> Unit, showPreview: Boolean, onShowP
             IconButton(onClick = { viewModel.redo() }, enabled = page.redo.isNotEmpty(), modifier = Modifier.size(44.dp)) {
                 Icon(Icons.Default.Redo, contentDescription = "Redo")
             }
-            IconButton(onClick = { previewText = viewModel.combinedText(); onShowPreview(true) }, modifier = Modifier.size(44.dp)) {
+            IconButton(onClick = { previewText = viewModel.combinedText(); onOverlay(HwOverlay.Preview) }, modifier = Modifier.size(44.dp)) {
                 Icon(Icons.Default.Fullscreen, contentDescription = "Full preview of all pages")
             }
             Box {
@@ -383,6 +419,23 @@ private fun HandwritingContent(onBack: () -> Unit, showPreview: Boolean, onShowP
                     DropdownMenuItem(
                         text = { Text(if (autoFix) "Auto-fix spelling & grammar: ON" else "Auto-fix spelling & grammar: OFF") },
                         onClick = { menuOpen = false; viewModel.setAutoFix(!autoFix) }
+                    )
+                    DropdownMenuItem(
+                        text = { Text(if (currentNoteId == null) "Save as a note (named by date and time)" else "Update the saved note") },
+                        onClick = {
+                            menuOpen = false
+                            viewModel.saveNote { note ->
+                                Toast.makeText(
+                                    context,
+                                    if (note == null) "Nothing to save yet" else "Saved: ${note.title}",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("My saved notes (list)…") },
+                        onClick = { menuOpen = false; onOverlay(HwOverlay.NotesList) }
                     )
                     DropdownMenuItem(
                         text = { Text("Save this page's writing under a title…") },

@@ -109,21 +109,15 @@ object HandwritingStore {
     fun load(context: Context): List<HwPage> {
         val file = File(context.filesDir, FILE_NAME)
         if (!file.exists()) return listOf(HwPage())
-        return runCatching {
-            val pages = JSONArray(file.readText())
-            (0 until pages.length()).map { i ->
-                val obj = pages.getJSONObject(i)
-                HwPage(
-                    items = itemsFromJson(obj.getJSONArray("items")),
-                    text = obj.optString("text"),
-                    textEdited = obj.optBoolean("edited"),
-                    imagePath = obj.optString("img").takeIf { it.isNotEmpty() && File(it).exists() }
-                )
-            }.ifEmpty { listOf(HwPage()) }
-        }.getOrDefault(listOf(HwPage()))
+        return runCatching { pagesFromJson(JSONArray(file.readText())) }.getOrDefault(listOf(HwPage()))
     }
 
     fun save(context: Context, pages: List<HwPage>) {
+        File(context.filesDir, FILE_NAME).writeText(pagesToJson(pages).toString())
+    }
+
+    /** Pages as JSON — shared by the notepad's own draft and by saved notes. */
+    fun pagesToJson(pages: List<HwPage>): JSONArray {
         val array = JSONArray()
         pages.forEach { page ->
             array.put(
@@ -134,8 +128,19 @@ object HandwritingStore {
                     .put("img", page.imagePath ?: "")
             )
         }
-        File(context.filesDir, FILE_NAME).writeText(array.toString())
+        return array
     }
+
+    fun pagesFromJson(pages: JSONArray): List<HwPage> =
+        (0 until pages.length()).map { i ->
+            val obj = pages.getJSONObject(i)
+            HwPage(
+                items = itemsFromJson(obj.getJSONArray("items")),
+                text = obj.optString("text"),
+                textEdited = obj.optBoolean("edited"),
+                imagePath = obj.optString("img").takeIf { it.isNotEmpty() && File(it).exists() }
+            )
+        }.ifEmpty { listOf(HwPage()) }
 
     // --- saved snippets --------------------------------------------------------------------
 

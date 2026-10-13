@@ -11,6 +11,8 @@ import com.mobicareapp.handwriting.HandwritingExport
 import com.mobicareapp.handwriting.HandwritingRecognizer
 import com.mobicareapp.handwriting.HandwritingStore
 import com.mobicareapp.handwriting.HwPage
+import com.mobicareapp.handwriting.HandwritingNoteStore
+import com.mobicareapp.handwriting.HwNoteMeta
 import com.mobicareapp.handwriting.HwSnippet
 import com.mobicareapp.handwriting.HwStroke
 import com.mobicareapp.handwriting.ItemTransform
@@ -76,6 +78,14 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
     private val _snippets = MutableStateFlow(HandwritingStore.loadSnippets(application))
     /** Saved sentences/handwriting that can be inserted into any page (newest first). */
     val snippets: StateFlow<List<HwSnippet>> = _snippets.asStateFlow()
+
+    private val _notes = MutableStateFlow(HandwritingNoteStore.loadIndex(application))
+    /** Saved notes, newest first. */
+    val notes: StateFlow<List<HwNoteMeta>> = _notes.asStateFlow()
+
+    /** The saved note this notepad currently holds (so "Save note" updates it), or null for a new, unsaved notepad. */
+    private val _noteId = MutableStateFlow<Long?>(null)
+    val currentNoteId: StateFlow<Long?> = _noteId.asStateFlow()
 
     /** A page's height divided by its width on this phone's pad (set by the screen) — used to draw pages the same shape when exporting. */
     @Volatile var pageRatio = 1.8f
@@ -189,6 +199,7 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
         recognizeJobs.values.forEach { it.cancel() }
         recognizeJobs.clear()
         clearSuggestions()
+        _noteId.value = null
         _pages.value.forEach { page -> page.imagePath?.let { File(it).delete() } }
         _pages.value = listOf(HwPage())
         _pageIndex.value = 0
@@ -259,6 +270,105 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
         updatePage(index) { it.copy(items = it.items.dropLast(strokes.size) + replaced, redo = emptyList()) }
         clearSuggestions()
         scheduleRecognition(index, RECOGNIZE_DELAY_MS)
+    }
+
+    // --- saved notes -------------------------------------------------------------------------
+
+    /**
+     * Saves the whole notepad (every page, pictures included) as a note named after the date and time,
+     * titled with a small part of its text. If this notepad was opened from a saved note, that note is
+     * updated instead of a new one being made. [onSaved] gets the note, or null if there was nothing to save.
+     */
+    fun saveNote(onSaved: (HwNoteMeta?) -> Unit) {
+        val pages = _pages.value
+        if (pages.all { it.items.isEmpty() && it.imagePath == null }) {
+            onSaved(null)
+            return
+        }
+        val text = combinedText()
+        val existing = _noteId.value?.let { id -> _notes.value.firstOrNull { it.id == id } }
+        viewModelScope.launch {
+            val now = System.currentTimeMillis()
+            val id = existing?.id ?: now
+            val meta = HwNoteMeta(
+                id = id,
+                createdAt = existing?.createdAt ?: now,
+                updatedAt = now,
+                title = existing?.title ?: HandwritingNoteStore.makeTitle(text),
+                text = text,
+                audioPath = existing?.audioPath,
+                pageCount = pages.size
+            )
+            withContext(Dispatchers.IO) {
+                HandwritingNoteStore.savePages(context, id, pages)
+                val index = listOf(meta) + _notes.value.filterNot { it.id == id }
+                HandwritingNoteStore.saveIndex(context, index)
+                _notes.value = index
+            }
+            _noteId.value = id
+            onSaved(meta)
+        }
+    }
+
+    /** Replaces the notepad's content with the saved note [id], so it can be read and edited on the pad. */
+    fun openNote(id: Long, onOpened: () -> Unit) {
+        viewModelScope.launch {
+            val pages = withContext(Dispatchers.IO) {
+                HandwritingNoteStore.pagesForEditing(context, HandwritingNoteStore.loadPages(context, id))
+            }
+            recognizeJobs.values.forEach { it.cancel() }
+            recognizeJobs.clear()
+            clearSuggestions()
+            _pages.value.forEach { page -> page.imagePath?.let { File(it).delete() } }
+            _pages.value = pages
+            _pageIndex.value = 0
+            _noteId.value = id
+            persist()
+            onOpened()
+        }
+    }
+
+    fun deleteNote(id: Long) {
+        viewModelScope.launch(Dispatchers.IO) {
+            HandwritingNoteStore.delete(context, id)
+            val index = _notes.value.filterNot { it.id == id }
+            HandwritingNoteStore.saveIndex(context, index)
+            _notes.value = index
+        }
+        if (_noteId.value == id) _noteId.value = null
+    }
+
+    /** Changes made on the note's own screen (title, text). The handwriting itself is not touched. */
+    fun updateNoteTexts(id: Long, title: String, text: String) {
+        val note = _notes.value.firstOrNull { it.id == id } ?: return
+        val updated = note.copy(title = title.trim().ifEmpty { note.title }, text = text, updatedAt = System.currentTimeMillis())
+        val index = _notes.value.map { if (it.id == id) updated else it }
+        _notes.value = index
+        viewModelScope.launch(Dispatchers.IO) { HandwritingNoteStore.saveIndex(context, index) }
+    }
+
+    /** Attaches a voice recording (MP3 or any audio) to the note, keeping a copy with the note. */
+    fun attachAudio(id: Long, source: File, onDone: (Boolean) -> Unit) {
+        viewModelScope.launch {
+            val stored = withContext(Dispatchers.IO) { runCatching { HandwritingNoteStore.storeAudio(context, id, source) }.getOrNull() }
+            if (stored == null) {
+                onDone(false)
+                return@launch
+            }
+            val index = _notes.value.map { if (it.id == id) it.copy(audioPath = stored, updatedAt = System.currentTimeMillis()) else it }
+            _notes.value = index
+            withContext(Dispatchers.IO) { HandwritingNoteStore.saveIndex(context, index) }
+            onDone(true)
+        }
+    }
+
+    fun removeAudio(id: Long) {
+        val index = _notes.value.map { if (it.id == id) it.copy(audioPath = null) else it }
+        _notes.value = index
+        viewModelScope.launch(Dispatchers.IO) {
+            HandwritingNoteStore.deleteAudio(context, id)
+            HandwritingNoteStore.saveIndex(context, index)
+        }
     }
 
     // --- saved snippets ----------------------------------------------------------------------
