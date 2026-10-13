@@ -3,11 +3,17 @@ package com.mobicareapp.ui.handwriting
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.net.Uri
 import com.mobicareapp.handwriting.GrammarFixer
+import com.mobicareapp.handwriting.HandwritingExport
 import com.mobicareapp.handwriting.HandwritingRecognizer
 import com.mobicareapp.handwriting.HandwritingStore
 import com.mobicareapp.handwriting.HwPage
+import com.mobicareapp.handwriting.HwSnippet
 import com.mobicareapp.handwriting.HwStroke
+import com.mobicareapp.handwriting.ItemTransform
 import com.mobicareapp.handwriting.InkItem
 import com.mobicareapp.handwriting.InkLayout
 import com.mobicareapp.handwriting.PageItem
@@ -22,6 +28,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
 sealed class ModelState {
     data object Checking : ModelState()
@@ -65,6 +72,13 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
      */
     private val _suggestionsStale = MutableStateFlow(false)
     val suggestionsStale: StateFlow<Boolean> = _suggestionsStale.asStateFlow()
+
+    private val _snippets = MutableStateFlow(HandwritingStore.loadSnippets(application))
+    /** Saved sentences/handwriting that can be inserted into any page (newest first). */
+    val snippets: StateFlow<List<HwSnippet>> = _snippets.asStateFlow()
+
+    /** A page's height divided by its width on this phone's pad (set by the screen) — used to draw pages the same shape when exporting. */
+    @Volatile var pageRatio = 1.8f
 
     /** Why the last attempt to read the handwriting failed, if it did — shown under the text panel instead of failing silently. */
     private val _readError = MutableStateFlow<String?>(null)
@@ -132,10 +146,16 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
         val page = _pages.value[index]
         val last = page.items.lastOrNull() ?: return
         updatePage(index) {
-            val remaining = it.items.dropLast(1)
-            // Undoing a tapped suggestion gives the half-written word's strokes back.
-            val restored = if (last is WordItem) remaining + last.replaced.map { stroke -> InkItem(stroke) } else remaining
-            it.copy(items = restored, redo = it.redo + last)
+            if (last.group != 0) {
+                // A whole inserted snippet goes in one Undo, not stroke by stroke.
+                val removed = it.items.takeLastWhile { item -> item.group == last.group }
+                it.copy(items = it.items.dropLast(removed.size), redo = it.redo + removed.asReversed())
+            } else {
+                val remaining = it.items.dropLast(1)
+                // Undoing a tapped suggestion gives the half-written word's strokes back.
+                val restored = if (last is WordItem) remaining + last.replaced.map { stroke -> InkItem(stroke) } else remaining
+                it.copy(items = restored, redo = it.redo + last)
+            }
         }
         scheduleRecognition(index, RECOGNIZE_DELAY_MS)
         scheduleSuggestions(index)
@@ -146,14 +166,20 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
         val page = _pages.value[index]
         val next = page.redo.lastOrNull() ?: return
         updatePage(index) {
-            val base = if (next is WordItem) it.items.dropLast(next.replaced.size) else it.items
-            it.copy(items = base + next, redo = it.redo.dropLast(1))
+            if (next.group != 0) {
+                val back = it.redo.takeLastWhile { item -> item.group == next.group }
+                it.copy(items = it.items + back.asReversed(), redo = it.redo.dropLast(back.size))
+            } else {
+                val base = if (next is WordItem) it.items.dropLast(next.replaced.size) else it.items
+                it.copy(items = base + next, redo = it.redo.dropLast(1))
+            }
         }
         scheduleRecognition(index, RECOGNIZE_DELAY_MS)
         scheduleSuggestions(index)
     }
 
     fun clearPage() {
+        _pages.value.getOrNull(_pageIndex.value)?.imagePath?.let { File(it).delete() }
         updatePage(_pageIndex.value) { HwPage() }
         clearSuggestions()
     }
@@ -163,6 +189,7 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
         recognizeJobs.values.forEach { it.cancel() }
         recognizeJobs.clear()
         clearSuggestions()
+        _pages.value.forEach { page -> page.imagePath?.let { File(it).delete() } }
         _pages.value = listOf(HwPage())
         _pageIndex.value = 0
         persist()
@@ -233,6 +260,120 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
         clearSuggestions()
         scheduleRecognition(index, RECOGNIZE_DELAY_MS)
     }
+
+    // --- saved snippets ----------------------------------------------------------------------
+
+    /** Saves what is on the current page under [title], to be inserted later. Returns false if the page is empty. */
+    fun saveSnippet(title: String): Boolean {
+        val page = _pages.value.getOrNull(_pageIndex.value) ?: return false
+        val name = title.trim()
+        if (name.isEmpty() || page.items.isEmpty()) return false
+        val snippet = HwSnippet(
+            id = System.currentTimeMillis(),
+            title = name,
+            createdAt = System.currentTimeMillis(),
+            // Stored without grouping tags; they're given a fresh one each time the snippet is inserted.
+            items = page.items.map { item ->
+                when (item) {
+                    is InkItem -> item.copy(group = 0)
+                    is WordItem -> item.copy(group = 0)
+                }
+            },
+            text = page.text
+        )
+        _snippets.update { listOf(snippet) + it }
+        persistSnippets()
+        return true
+    }
+
+    fun deleteSnippet(id: Long) {
+        _snippets.update { list -> list.filterNot { it.id == id } }
+        persistSnippets()
+    }
+
+    /**
+     * Puts a saved snippet onto the current page, below whatever is already written there (or at the
+     * top of an empty page), and reads it straight away. The whole snippet goes in as one Undo step.
+     */
+    fun insertSnippet(snippet: HwSnippet) {
+        val index = _pageIndex.value
+        val page = _pages.value.getOrNull(index) ?: return
+        if (snippet.items.isEmpty()) return
+        val snippetTop = HwPage(items = snippet.items).highestY
+        val targetTop = if (page.items.isEmpty()) INSERT_MARGIN else page.lowestY + INSERT_GAP
+        val timeShift = if (page.items.isEmpty()) 0L else ItemTransform.lastTime(page.items) + 1000L - ItemTransform.firstTime(snippet.items)
+        val group = (System.currentTimeMillis() % Int.MAX_VALUE).toInt().coerceAtLeast(1)
+        val moved = ItemTransform.shifted(snippet.items, targetTop - snippetTop, timeShift, group)
+        updatePage(index) { current ->
+            if (current.textEdited) {
+                // The text was fixed by hand and is protected from being re-read, so add the saved text to it.
+                current.copy(items = current.items + moved, redo = emptyList(), text = HandwritingRecognizer.joinPieces(listOf(current.text.trim(), snippet.text.trim()).filter { it.isNotEmpty() }, context))
+            } else {
+                current.copy(items = current.items + moved, redo = emptyList())
+            }
+        }
+        clearSuggestions()
+        scheduleRecognition(index, 0)
+    }
+
+    private fun persistSnippets() {
+        viewModelScope.launch(Dispatchers.IO) { HandwritingStore.saveSnippets(context, _snippets.value) }
+    }
+
+    // --- picture from the gallery ---------------------------------------------------------------
+
+    /** Puts a gallery photo on the current page, scaled to fit the whole pad, behind the writing. */
+    fun insertImage(uri: Uri) {
+        val index = _pageIndex.value
+        viewModelScope.launch {
+            val path = withContext(Dispatchers.IO) { runCatching { copyDownscaled(uri) }.getOrNull() }
+            if (path == null) {
+                _readError.value = "Couldn't open that picture"
+                return@launch
+            }
+            _pages.value.getOrNull(index)?.imagePath?.let { old -> File(old).delete() }
+            updatePage(index) { it.copy(imagePath = path) }
+        }
+    }
+
+    fun removeImage() {
+        val index = _pageIndex.value
+        _pages.value.getOrNull(index)?.imagePath?.let { File(it).delete() }
+        updatePage(index) { it.copy(imagePath = null) }
+    }
+
+    /** Keeps a copy inside the app (so the picture survives the gallery moving it) at no more than 1600 px, turned upright. */
+    private fun copyDownscaled(uri: Uri): String {
+        val resolver = context.contentResolver
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+        var sample = 1
+        while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= 1600) sample *= 2
+        val decoded = resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = sample }) }
+            ?: error("unreadable")
+        val degrees = runCatching {
+            resolver.openInputStream(uri)?.use { stream ->
+                when (android.media.ExifInterface(stream).getAttributeInt(android.media.ExifInterface.TAG_ORIENTATION, android.media.ExifInterface.ORIENTATION_NORMAL)) {
+                    android.media.ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+                    android.media.ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+                    android.media.ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+                    else -> 0f
+                }
+            }
+        }.getOrNull() ?: 0f
+        val upright = if (degrees == 0f) decoded else Bitmap.createBitmap(
+            decoded, 0, 0, decoded.width, decoded.height, android.graphics.Matrix().apply { postRotate(degrees) }, true
+        )
+        val dir = File(context.filesDir, "handwriting_images").apply { mkdirs() }
+        val file = File(dir, "img_${System.currentTimeMillis()}.jpg")
+        file.outputStream().use { upright.compress(Bitmap.CompressFormat.JPEG, 90, it) }
+        return file.absolutePath
+    }
+
+    // --- download everything ---------------------------------------------------------------------
+
+    /** Every page stacked top to bottom as one tall image, ready to save. Heavy: call off the main thread. */
+    fun renderAllPages(): Bitmap = HandwritingExport.renderAll(_pages.value, pageRatio)
 
     // --- text ------------------------------------------------------------------------------
 
@@ -336,6 +477,10 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
 
         /** Shorter wait before suggestions appear, so they're there while the writer is still deciding about the word. */
         const val SUGGEST_DELAY_MS = 450L
+
+        /** Where an inserted snippet lands on an empty page (page widths from the top), and the gap left below existing writing. */
+        const val INSERT_MARGIN = 0.05f
+        const val INSERT_GAP = 0.08f
 
         /** Limits (in page widths) for the font size of a completed word. */
         const val WORD_SIZE_MIN = 0.045f

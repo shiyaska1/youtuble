@@ -1,6 +1,26 @@
 package com.mobicareapp.ui.handwriting
 
 import android.content.ClipData
+import java.util.Locale
+import java.util.Date
+import java.text.SimpleDateFormat
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Dispatchers
+import com.mobicareapp.handwriting.HwSnippet
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.runtime.produceState
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.layout.heightIn
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.compose.rememberLauncherForActivityResult
+import android.graphics.BitmapFactory
+import android.graphics.Bitmap
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowCompat
@@ -182,6 +202,35 @@ private fun HandwritingContent(onBack: () -> Unit, showPreview: Boolean, onShowP
     var confirmNewNotepad by remember { mutableStateOf(false) }
     var fixingPage by remember { mutableStateOf(false) }
     var canvasRatio by remember { mutableStateOf(1.8f) }
+    val snippets by viewModel.snippets.collectAsState()
+    var showSaveSnippet by remember { mutableStateOf(false) }
+    var showInsertSnippet by remember { mutableStateOf(false) }
+
+    // A photo from the gallery goes in behind the writing, fitted to the whole pad.
+    val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri != null) viewModel.insertImage(uri)
+    }
+
+    // "Download": every page stacked top to bottom as one tall PNG, saved wherever the user chooses.
+    val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("image/png")) { uri ->
+        if (uri != null) {
+            Toast.makeText(context, "Saving all pages…", Toast.LENGTH_SHORT).show()
+            scope.launch {
+                val ok = withContext(Dispatchers.IO) {
+                    runCatching {
+                        val bitmap = viewModel.renderAllPages()
+                        try {
+                            context.contentResolver.openOutputStream(uri)?.use { out -> bitmap.compress(Bitmap.CompressFormat.PNG, 100, out) }
+                                ?: error("Couldn't write to the chosen place")
+                        } finally {
+                            bitmap.recycle()
+                        }
+                    }.isSuccess
+                }
+                Toast.makeText(context, if (ok) "Saved all pages as one image" else "Couldn't save the image", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
 
     if (showPreview) {
         HandwritingPreviewScreen(
@@ -196,9 +245,30 @@ private fun HandwritingContent(onBack: () -> Unit, showPreview: Boolean, onShowP
 
     val index = pageIndex.coerceIn(0, pages.lastIndex)
     val page = pages[index]
+    val pageImage by produceState<ImageBitmap?>(null, page.imagePath) {
+        value = page.imagePath?.let { path -> withContext(Dispatchers.IO) { runCatching { BitmapFactory.decodeFile(path)?.asImageBitmap() }.getOrNull() } }
+    }
     // Nudge towards "Next page" once writing reaches the bottom edge.
     val pageFull = page.lowestY > canvasRatio * 0.9f
 
+    if (showSaveSnippet) {
+        SaveSnippetDialog(
+            onSave = { title ->
+                showSaveSnippet = false
+                val saved = viewModel.saveSnippet(title)
+                Toast.makeText(context, if (saved) "Saved as \"$title\"" else "Nothing to save on this page", Toast.LENGTH_SHORT).show()
+            },
+            onDismiss = { showSaveSnippet = false }
+        )
+    }
+    if (showInsertSnippet) {
+        InsertSnippetDialog(
+            snippets = snippets,
+            onInsert = { snippet -> showInsertSnippet = false; viewModel.insertSnippet(snippet) },
+            onDelete = { viewModel.deleteSnippet(it.id) },
+            onDismiss = { showInsertSnippet = false }
+        )
+    }
     if (confirmClearPage) {
         AlertDialog(
             onDismissRequest = { confirmClearPage = false },
@@ -245,6 +315,34 @@ private fun HandwritingContent(onBack: () -> Unit, showPreview: Boolean, onShowP
                     DropdownMenuItem(
                         text = { Text(if (autoFix) "Auto-fix spelling & grammar: ON" else "Auto-fix spelling & grammar: OFF") },
                         onClick = { menuOpen = false; viewModel.setAutoFix(!autoFix) }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Save this page's writing under a title…") },
+                        enabled = page.items.isNotEmpty(),
+                        onClick = { menuOpen = false; showSaveSnippet = true }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Insert a saved writing (search by title)…") },
+                        onClick = { menuOpen = false; showInsertSnippet = true }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Insert a picture from the gallery…") },
+                        onClick = {
+                            menuOpen = false
+                            AppLockManager.suppressNextLock()
+                            galleryLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                        }
+                    )
+                    if (page.imagePath != null) {
+                        DropdownMenuItem(text = { Text("Remove the picture from this page") }, onClick = { menuOpen = false; viewModel.removeImage() })
+                    }
+                    DropdownMenuItem(
+                        text = { Text("Download all pages as one image…") },
+                        onClick = {
+                            menuOpen = false
+                            AppLockManager.suppressNextLock()
+                            exportLauncher.launch("Handwriting_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".png")
+                        }
                     )
                     DropdownMenuItem(text = { Text("Clear this page") }, onClick = { menuOpen = false; confirmClearPage = true })
                     DropdownMenuItem(text = { Text("New notepad") }, onClick = { menuOpen = false; confirmNewNotepad = true })
@@ -317,8 +415,9 @@ private fun HandwritingContent(onBack: () -> Unit, showPreview: Boolean, onShowP
         Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
             HandwritingCanvas(
                 items = page.items,
+                image = pageImage,
                 onStroke = { viewModel.addStroke(it) },
-                onSize = { ratio -> canvasRatio = ratio },
+                onSize = { ratio -> canvasRatio = ratio; viewModel.pageRatio = ratio },
                 modifier = Modifier.fillMaxSize()
             )
 
@@ -429,10 +528,106 @@ private fun HandwritingContent(onBack: () -> Unit, showPreview: Boolean, onShowP
     }
 }
 
+/** Asks for the title a piece of writing is saved under. */
+@Composable
+private fun SaveSnippetDialog(onSave: (String) -> Unit, onDismiss: () -> Unit) {
+    var title by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Save this writing") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Give it a title, so you can find it later and insert it into any page.", style = MaterialTheme.typography.bodyMedium)
+                OutlinedTextField(
+                    value = title,
+                    onValueChange = { title = it },
+                    singleLine = true,
+                    label = { Text("Title") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = { TextButton(enabled = title.isNotBlank(), onClick = { onSave(title) }) { Text("Save") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+    )
+}
+
+/** Search the saved writings by title; tapping one puts it on the page (and it is read automatically). */
+@Composable
+private fun InsertSnippetDialog(
+    snippets: List<HwSnippet>,
+    onInsert: (HwSnippet) -> Unit,
+    onDelete: (HwSnippet) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var query by remember { mutableStateOf("") }
+    var pendingDelete by remember { mutableStateOf<HwSnippet?>(null) }
+    val matches = snippets.filter { it.title.contains(query.trim(), ignoreCase = true) }
+
+    pendingDelete?.let { snippet ->
+        AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            title = { Text("Delete this saved writing?") },
+            text = { Text("\"${snippet.title}\" will be removed. This can't be undone.") },
+            confirmButton = { TextButton(onClick = { onDelete(snippet); pendingDelete = null }) { Text("Yes, delete") } },
+            dismissButton = { TextButton(onClick = { pendingDelete = null }) { Text("No") } }
+        )
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Insert saved writing") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    singleLine = true,
+                    label = { Text("Search by title") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                if (snippets.isEmpty()) {
+                    Text("Nothing saved yet. Write something, then use \"Save this page's writing under a title\" in the ⋮ menu.", style = MaterialTheme.typography.bodyMedium)
+                } else if (matches.isEmpty()) {
+                    Text("No saved writing matches that title.", style = MaterialTheme.typography.bodyMedium)
+                } else {
+                    LazyColumn(modifier = Modifier.heightIn(max = 320.dp)) {
+                        items(matches, key = { it.id }) { snippet ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth().clickable { onInsert(snippet) }.padding(vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(snippet.title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    if (snippet.text.isNotBlank()) {
+                                        Text(
+                                            snippet.text.replace('\n', ' '),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
+                                IconButton(onClick = { pendingDelete = snippet }) {
+                                    Icon(Icons.Default.Delete, contentDescription = "Delete")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Close") } }
+    )
+}
+
 /** Plain paper that records strokes (one finger or stylus) and draws them as smooth curves. */
 @Composable
 private fun HandwritingCanvas(
     items: List<PageItem>,
+    image: ImageBitmap?,
     onStroke: (HwStroke) -> Unit,
     onSize: (Float) -> Unit,
     modifier: Modifier = Modifier
@@ -474,6 +669,18 @@ private fun HandwritingCanvas(
                 }
             }
     ) {
+        // An inserted photo: scaled to fit the whole pad (nothing cropped), centred, behind the writing.
+        if (image != null) {
+            val scale = minOf(size.width / image.width, size.height / image.height)
+            val w = (image.width * scale).toInt()
+            val h = (image.height * scale).toInt()
+            drawImage(
+                image,
+                dstOffset = IntOffset(((size.width - w) / 2f).toInt(), ((size.height - h) / 2f).toInt()),
+                dstSize = IntSize(w, h)
+            )
+        }
+
         val inkWidth = size.width * INK_WIDTH
         items.forEach { item ->
             when (item) {
