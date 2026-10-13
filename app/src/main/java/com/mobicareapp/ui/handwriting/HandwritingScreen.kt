@@ -1,6 +1,11 @@
 package com.mobicareapp.ui.handwriting
 
 import android.content.ClipData
+import androidx.core.content.FileProvider
+import androidx.core.content.ContextCompat
+import android.net.Uri
+import android.content.pm.PackageManager
+import android.Manifest
 import java.io.FileOutputStream
 import java.io.File
 import com.mobicareapp.upload.PersonalServerUploader
@@ -233,6 +238,25 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
         if (uris.isNotEmpty()) viewModel.insertImages(uris)
     }
 
+    // The camera: takes a photo and fits it to the page that's showing (replacing that page's picture).
+    var pendingCameraFile by remember { mutableStateOf<File?>(null) }
+    val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
+        val file = pendingCameraFile
+        pendingCameraFile = null
+        if (success && file != null && file.length() > 0) viewModel.insertImages(listOf(Uri.fromFile(file)), deleteSourceFiles = true)
+        else file?.delete()
+    }
+    fun launchCamera() {
+        val dir = File(context.getExternalFilesDir(null), "HandwritingCamera").apply { mkdirs() }
+        val file = File(dir, "camera_${System.currentTimeMillis()}.jpg")
+        pendingCameraFile = file
+        AppLockManager.suppressNextLock()
+        cameraLauncher.launch(FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file))
+    }
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) launchCamera() else Toast.makeText(context, "Camera permission is needed to take a photo", Toast.LENGTH_LONG).show()
+    }
+
     // "Download": every page stacked top to bottom as one tall PNG, saved wherever the user chooses.
     val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("image/png")) { uri ->
         if (uri != null) {
@@ -452,6 +476,18 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
                             menuOpen = false
                             AppLockManager.suppressNextLock()
                             galleryLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Take a photo with the camera (fits this page)…") },
+                        onClick = {
+                            menuOpen = false
+                            if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                                launchCamera()
+                            } else {
+                                AppLockManager.suppressNextLock()
+                                cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                            }
                         }
                     )
                     if (page.imagePath != null) {

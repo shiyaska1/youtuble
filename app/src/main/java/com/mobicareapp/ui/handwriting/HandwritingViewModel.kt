@@ -442,11 +442,16 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
      * first goes on the current page; every further picture gets a page of its own, added right after
      * the one before it (pages that were already there are pushed further along, not overwritten).
      */
-    fun insertImages(uris: List<Uri>) {
+    fun insertImages(uris: List<Uri>, deleteSourceFiles: Boolean = false) {
         if (uris.isEmpty()) return
         val startIndex = _pageIndex.value
         viewModelScope.launch {
-            val paths = withContext(Dispatchers.IO) { uris.mapNotNull { uri -> runCatching { copyDownscaled(uri) }.getOrNull() } }
+            val paths = withContext(Dispatchers.IO) {
+                uris.mapNotNull { uri -> runCatching { copyDownscaled(uri) }.getOrNull() }.also {
+                    // A photo just taken with the camera is a full-size temporary file; once the page has its own copy it can go.
+                    if (deleteSourceFiles) uris.forEach { uri -> if (uri.scheme == "file") runCatching { File(uri.path!!).delete() } }
+                }
+            }
             if (paths.isEmpty()) {
                 _readError.value = "Couldn't open that picture"
                 return@launch
