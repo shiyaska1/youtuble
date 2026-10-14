@@ -73,6 +73,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -96,6 +97,7 @@ import coil.compose.AsyncImage
 import com.mobicareapp.applock.AppLockManager
 import com.mobicareapp.data.ScannedDocument
 import com.mobicareapp.scan.ScanFileStore
+import com.mobicareapp.handwriting.HandwritingStartup
 import com.mobicareapp.ui.handwriting.HandwritingScreen
 import com.mobicareapp.ui.upload.UploadLinkScreen
 import com.mobicareapp.wifisend.WifiSendDialog
@@ -127,6 +129,8 @@ fun ScanScreen() {
     var showQuestionPaper by remember { mutableStateOf(false) }
     var showUploadLink by remember { mutableStateOf(false) }
     var showHandwriting by remember { mutableStateOf(false) }
+    // Launched from a fresh app start: open the handwriting notepad straight away (once).
+    LaunchedEffect(Unit) { if (HandwritingStartup.consume()) showHandwriting = true }
 
     // Rendered unconditionally (rather than inside one of the branches below) so it stays on top
     // as an overlay no matter which screen — the document list or a single document's pages — is

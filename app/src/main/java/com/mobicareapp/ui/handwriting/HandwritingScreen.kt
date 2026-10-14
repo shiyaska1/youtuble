@@ -17,6 +17,7 @@ import java.util.Date
 import java.text.SimpleDateFormat
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Dispatchers
+import com.mobicareapp.handwriting.HandwritingStore
 import com.mobicareapp.handwriting.HwSnippet
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.IntOffset
@@ -221,6 +222,11 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
         onDispose { AppLockManager.releaseLockHold() }
     }
 
+    // When the notepad opens with earlier writing in it, ask once: carry on with it, or start a clean
+    // single page for a quick note. Decided at the moment of opening, so it never pops up mid-writing.
+    val askAtStart = remember { pages.any { it.items.isNotEmpty() || it.imagePath != null } || pages.size > 1 }
+    var startChoiceDone by remember { mutableStateOf(false) }
+    var openAtStartup by remember { mutableStateOf(HandwritingStore.isOpenAtStartup(context)) }
     var previewText by remember { mutableStateOf("") }
     var panelOpen by remember { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
@@ -397,6 +403,27 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
             onDismiss = { showInsertSnippet = false }
         )
     }
+    if (askAtStart && !startChoiceDone && overlay == HwOverlay.None) {
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text("Handwriting pad") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("There is writing from before on the pad (${pages.size} page(s)). Keep it, or start a new notepad with one clear page?")
+                    // Starting new throws the old writing away, so offer to put it in the saved-notes list first.
+                    TextButton(onClick = {
+                        viewModel.saveNote { note ->
+                            Toast.makeText(context, if (note != null) "Saved: ${note.title}" else "Nothing to save", Toast.LENGTH_SHORT).show()
+                            viewModel.newNotepad()
+                            startChoiceDone = true
+                        }
+                    }) { Text("Save it as a note, then start new") }
+                }
+            },
+            confirmButton = { TextButton(onClick = { viewModel.newNotepad(); startChoiceDone = true }) { Text("New notepad") } },
+            dismissButton = { TextButton(onClick = { startChoiceDone = true }) { Text("Keep existing") } }
+        )
+    }
     if (confirmClearPage) {
         AlertDialog(
             onDismissRequest = { confirmClearPage = false },
@@ -504,6 +531,14 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
                     DropdownMenuItem(
                         text = { Text("Upload all pages to my server (1.jpg)") },
                         onClick = { menuOpen = false; uploadAllPages() }
+                    )
+                    DropdownMenuItem(
+                        text = { Text(if (openAtStartup) "Open this pad when the app starts: ON" else "Open this pad when the app starts: OFF") },
+                        onClick = {
+                            menuOpen = false
+                            openAtStartup = !openAtStartup
+                            HandwritingStore.setOpenAtStartup(context, openAtStartup)
+                        }
                     )
                     DropdownMenuItem(text = { Text("Clear this page") }, onClick = { menuOpen = false; confirmClearPage = true })
                     DropdownMenuItem(text = { Text("New notepad") }, onClick = { menuOpen = false; confirmNewNotepad = true })

@@ -96,12 +96,21 @@ object HandwritingStore {
     private const val SNIPPETS_FILE = "handwriting_snippets.json"
     private const val PREFS = "handwriting_prefs"
     private const val KEY_AUTO_FIX = "auto_fix"
+    private const val KEY_OPEN_AT_STARTUP = "open_at_startup"
 
     fun isAutoFixEnabled(context: Context): Boolean =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_AUTO_FIX, true)
 
     fun setAutoFixEnabled(context: Context, enabled: Boolean) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_AUTO_FIX, enabled).apply()
+    }
+
+    /** Whether the handwriting notepad opens by itself when the app is launched (on by default: it is meant for quick notes). */
+    fun isOpenAtStartup(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_OPEN_AT_STARTUP, true)
+
+    fun setOpenAtStartup(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_OPEN_AT_STARTUP, enabled).apply()
     }
 
     // --- pages -----------------------------------------------------------------------------

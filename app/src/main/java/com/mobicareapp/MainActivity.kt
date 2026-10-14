@@ -52,6 +52,8 @@ import com.mobicareapp.applock.AppLockManager
 import com.mobicareapp.applock.AppLockScreen
 import com.mobicareapp.applock.canUseAppLock
 import com.mobicareapp.data.SavedMedia
+import com.mobicareapp.handwriting.HandwritingStartup
+import com.mobicareapp.handwriting.HandwritingStore
 import com.mobicareapp.ui.home.HomeScreen
 import com.mobicareapp.ui.library.LibraryScreen
 import com.mobicareapp.ui.nav.ContactBanner
@@ -86,6 +88,12 @@ class MainActivity : FragmentActivity() {
         }
         AppLockManager.registerLifecycleObserver()
         handleQuickActionIntent(intent)
+        // A fresh launch (not a rotation/recreation, and not a record shortcut) opens the handwriting notepad for quick notes.
+        if (savedInstanceState == null && intent?.getStringExtra(EXTRA_QUICK_ACTION) == null &&
+            HandwritingStore.isOpenAtStartup(this)
+        ) {
+            HandwritingStartup.request()
+        }
         setContent {
             YtSaverTheme {
                 AppRoot(this)
@@ -186,6 +194,10 @@ private fun AppRoot(activity: FragmentActivity) {
     val pendingQuickAction by PendingQuickRecordAction.pending.collectAsState()
     LaunchedEffect(pendingQuickAction) {
         if (pendingQuickAction != null) selectedTab = 3
+    }
+    // Handwriting notepad as the start-up screen: it lives in the Scan tab, which opens it as soon as it appears.
+    LaunchedEffect(Unit) {
+        if (HandwritingStartup.isRequested() && PendingQuickRecordAction.pending.value == null) selectedTab = 2
     }
     val isInPip by PipState.isInPip.collectAsState()
     // Derived from the back stack (rather than toggled only from onBack callbacks) so it also
