@@ -329,6 +329,7 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun deleteNote(id: Long) {
+        com.mobicareapp.reminder.NoteReminders.remove(context, id)
         viewModelScope.launch(Dispatchers.IO) {
             HandwritingNoteStore.delete(context, id)
             val index = _notes.value.filterNot { it.id == id }

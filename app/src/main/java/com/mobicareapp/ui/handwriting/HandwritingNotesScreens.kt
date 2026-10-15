@@ -19,6 +19,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Alarm
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.AudioFile
 import androidx.compose.material.icons.filled.ContentCopy
@@ -53,6 +54,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.mobicareapp.handwriting.HwNoteMeta
+import com.mobicareapp.reminder.ReminderStore
 import com.mobicareapp.ui.transcribe.TranscribePickerDialog
 import java.io.File
 import java.text.DateFormat
@@ -88,6 +90,11 @@ fun NotesListScreen(viewModel: HandwritingViewModel, onBack: () -> Unit, onOpen:
     var pickingTo by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
     var pendingDelete by remember { mutableStateOf<HwNoteMeta?>(null) }
+    var reminderFor by remember { mutableStateOf<HwNoteMeta?>(null) }
+    // Bumped whenever a reminder changes, so the bell icons refresh.
+    var reminderVersion by remember { mutableStateOf(0) }
+    val context = LocalContext.current
+    val reminderIds = remember(reminderVersion, notes) { ReminderStore.loadAll(context).map { it.noteId }.toSet() }
     val zone = ZoneId.systemDefault()
 
     val now = System.currentTimeMillis()
@@ -110,6 +117,14 @@ fun NotesListScreen(viewModel: HandwritingViewModel, onBack: () -> Unit, onOpen:
     }
     if (pickingTo) {
         DayPickerDialog(initial = toDay, onPicked = { toDay = it; pickingTo = false }, onDismiss = { pickingTo = false })
+    }
+    reminderFor?.let { note ->
+        ReminderDialog(
+            noteId = note.id,
+            noteTitle = note.title,
+            onDismiss = { reminderFor = null },
+            onChanged = { reminderVersion++ }
+        )
     }
     pendingDelete?.let { note ->
         AlertDialog(
@@ -188,6 +203,13 @@ fun NotesListScreen(viewModel: HandwritingViewModel, onBack: () -> Unit, onOpen:
                             if (note.audioPath != null) {
                                 Icon(Icons.Default.AudioFile, contentDescription = "Has a voice recording", modifier = Modifier.padding(horizontal = 4.dp))
                             }
+                            IconButton(onClick = { reminderFor = note }) {
+                                Icon(
+                                    Icons.Default.Alarm,
+                                    contentDescription = "Reminder",
+                                    tint = if (note.id in reminderIds) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                             IconButton(onClick = { pendingDelete = note }) { Icon(Icons.Default.Delete, contentDescription = "Delete") }
                         }
                     }
@@ -199,7 +221,7 @@ fun NotesListScreen(viewModel: HandwritingViewModel, onBack: () -> Unit, onOpen:
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun DayPickerDialog(initial: LocalDate?, onPicked: (LocalDate) -> Unit, onDismiss: () -> Unit) {
+internal fun DayPickerDialog(initial: LocalDate?, onPicked: (LocalDate) -> Unit, onDismiss: () -> Unit) {
     val state = rememberDatePickerState(initialSelectedDateMillis = initial?.atStartOfDay(ZoneOffset.UTC)?.toInstant()?.toEpochMilli())
     DatePickerDialog(
         onDismissRequest = onDismiss,
@@ -238,6 +260,9 @@ fun NoteDetailScreen(
     var confirmDelete by remember { mutableStateOf(false) }
     var confirmOpen by remember { mutableStateOf(false) }
     var showAudioPicker by remember { mutableStateOf(false) }
+    var showReminder by remember { mutableStateOf(false) }
+    var reminderVersion by remember { mutableStateOf(0) }
+    val reminder = remember(noteId, reminderVersion) { ReminderStore.get(context, noteId) }
     val changed = title != note.title || text != note.text
 
     // The attached voice plays through a small player of its own; one at a time, stopped when leaving.
@@ -281,6 +306,14 @@ fun NoteDetailScreen(
             text = { Text("The writing now on the pad is replaced. Save it as a note first if you want to keep it.") },
             confirmButton = { TextButton(onClick = { confirmOpen = false; stopPlayback(); onOpenOnPad() }) { Text("Yes, open") } },
             dismissButton = { TextButton(onClick = { confirmOpen = false }) { Text("No") } }
+        )
+    }
+    if (showReminder) {
+        ReminderDialog(
+            noteId = noteId,
+            noteTitle = note.title,
+            onDismiss = { showReminder = false },
+            onChanged = { reminderVersion++ }
         )
     }
     if (showAudioPicker) {
@@ -331,6 +364,18 @@ fun NoteDetailScreen(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+
+            // Reminder.
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("Reminder", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        reminder?.let { describeReminder(context, it) } ?: "None set.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    OutlinedButton(onClick = { showReminder = true }) { Text(if (reminder == null) "Set a reminder" else "Change or stop the reminder") }
+                }
+            }
 
             // Attached voice.
             Card(modifier = Modifier.fillMaxWidth()) {
