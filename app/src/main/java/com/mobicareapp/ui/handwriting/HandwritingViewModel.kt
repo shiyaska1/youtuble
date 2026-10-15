@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import com.mobicareapp.handwriting.GrammarFixer
 import com.mobicareapp.handwriting.HandwritingExport
@@ -21,6 +22,7 @@ import com.mobicareapp.handwriting.InkLayout
 import com.mobicareapp.handwriting.PageItem
 import com.mobicareapp.handwriting.WordItem
 import com.mobicareapp.handwriting.WordSuggester
+import com.mobicareapp.textextract.PdfTextExtractor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -457,21 +459,82 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
                 _readError.value = "Couldn't open that picture"
                 return@launch
             }
-            // Picture one replaces any picture already on this page.
-            _pages.value.getOrNull(startIndex)?.imagePath?.let { old -> File(old).delete() }
-            _pages.update { pages ->
-                val result = pages.toMutableList()
-                result[startIndex] = result[startIndex].copy(imagePath = paths.first())
-                paths.drop(1).forEachIndexed { i, path -> result.add(startIndex + 1 + i, HwPage(imagePath = path)) }
-                result
-            }
-            persist()
-            // New pages shifted the ones after them, so any reading that was waiting is redone for the right page.
-            recognizeJobs.values.forEach { it.cancel() }
-            recognizeJobs.clear()
-            _pages.value.forEachIndexed { i, page -> if (page.items.isNotEmpty() && !page.textEdited) scheduleRecognition(i, 0) }
+            placeImagePaths(paths, startIndex)
             if (paths.size < uris.size) _readError.value = "${uris.size - paths.size} picture(s) couldn't be opened"
         }
+    }
+
+    /**
+     * Puts pictures (already stored as files) onto pages: the first on the page at [startIndex]
+     * (replacing any picture there), each further one on a new page added right after the one before.
+     */
+    private fun placeImagePaths(paths: List<String>, startIndex: Int) {
+        // Picture one replaces any picture already on this page.
+        _pages.value.getOrNull(startIndex)?.imagePath?.let { old -> File(old).delete() }
+        _pages.update { pages ->
+            val result = pages.toMutableList()
+            result[startIndex] = result[startIndex].copy(imagePath = paths.first())
+            paths.drop(1).forEachIndexed { i, path -> result.add(startIndex + 1 + i, HwPage(imagePath = path)) }
+            result
+        }
+        persist()
+        // New pages shifted the ones after them, so any reading that was waiting is redone for the right page.
+        recognizeJobs.values.forEach { it.cancel() }
+        recognizeJobs.clear()
+        _pages.value.forEachIndexed { i, page -> if (page.items.isNotEmpty() && !page.textEdited) scheduleRecognition(i, 0) }
+    }
+
+    // --- PDF: one page per screen ----------------------------------------------------------------
+
+    private val _importStatus = MutableStateFlow<String?>(null)
+    /** Progress text while a PDF is being turned into pages (null otherwise). */
+    val importStatus: StateFlow<String?> = _importStatus.asStateFlow()
+
+    /**
+     * Puts a PDF into the notepad with every page on a screen of its own: the first PDF page goes on
+     * the current screen, the rest on new screens added after it, in order. Each page becomes a
+     * picture fitted to the whole pad, and can be written on like any other picture.
+     */
+    fun insertPdf(uri: Uri) {
+        if (_importStatus.value != null) return
+        val startIndex = _pageIndex.value
+        viewModelScope.launch {
+            _importStatus.value = "Reading the PDF…"
+            val result = withContext(Dispatchers.IO) { runCatching { renderPdfPages(uri) } }
+            _importStatus.value = null
+            result
+                .onSuccess { (paths, pageCount) ->
+                    if (paths.isEmpty()) {
+                        _readError.value = "That PDF has no pages"
+                        return@onSuccess
+                    }
+                    placeImagePaths(paths, startIndex)
+                    if (pageCount > paths.size) _readError.value = "Only the first ${paths.size} of $pageCount PDF pages were added"
+                }
+                .onFailure { _readError.value = "Couldn't read that PDF" }
+        }
+    }
+
+    /** Draws each PDF page (up to [MAX_PDF_PAGES]) to a picture file, one at a time so a long PDF never fills memory. Returns the files and the PDF's real page count. */
+    private fun renderPdfPages(uri: Uri): Pair<List<String>, Int> {
+        val descriptor = context.contentResolver.openFileDescriptor(uri, "r") ?: error("unreadable")
+        val dir = File(context.filesDir, "handwriting_images").apply { mkdirs() }
+        val stamp = System.currentTimeMillis()
+        val paths = mutableListOf<String>()
+        var pageCount = 0
+        PdfRenderer(descriptor).use { renderer ->
+            pageCount = renderer.pageCount
+            val total = minOf(pageCount, MAX_PDF_PAGES)
+            for (i in 0 until total) {
+                _importStatus.value = "Adding PDF page ${i + 1} of $total…"
+                val bitmap = PdfTextExtractor.renderPage(renderer, i, PDF_RENDER_WIDTH)
+                val file = File(dir, "pdf_${stamp}_$i.jpg")
+                file.outputStream().use { bitmap.compress(Bitmap.CompressFormat.JPEG, 88, it) }
+                bitmap.recycle()
+                paths += file.absolutePath
+            }
+        }
+        return paths to pageCount
     }
 
     fun removeImage() {
@@ -615,6 +678,12 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
 
         /** Shorter wait before suggestions appear, so they're there while the writer is still deciding about the word. */
         const val SUGGEST_DELAY_MS = 450L
+
+        /** A PDF longer than this only has its first pages added (each becomes a picture file). */
+        const val MAX_PDF_PAGES = 60
+
+        /** Width, in pixels, each PDF page is drawn at: sharp enough to read when zoomed, small enough to keep files light. */
+        const val PDF_RENDER_WIDTH = 1400
 
         /** Where an inserted snippet lands on an empty page (page widths from the top), and the gap left below existing writing. */
         const val INSERT_MARGIN = 0.05f

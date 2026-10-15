@@ -79,6 +79,7 @@ import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Redo
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Undo
@@ -215,6 +216,7 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
     val suggestionsStale by viewModel.suggestionsStale.collectAsState()
     val readError by viewModel.readError.collectAsState()
     val currentNoteId by viewModel.currentNoteId.collectAsState()
+    val importStatus by viewModel.importStatus.collectAsState()
 
     // The notepad is saved to disk, but locking would still swap this screen out mid-sentence.
     DisposableEffect(Unit) {
@@ -252,6 +254,9 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
         if (success && file != null && file.length() > 0) viewModel.insertImages(listOf(Uri.fromFile(file)), deleteSourceFiles = true)
         else file?.delete()
     }
+    val pdfLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) viewModel.insertPdf(uri)
+    }
     fun launchCamera() {
         val dir = File(context.getExternalFilesDir(null), "HandwritingCamera").apply { mkdirs() }
         val file = File(dir, "camera_${System.currentTimeMillis()}.jpg")
@@ -261,6 +266,15 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
     }
     val cameraPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) launchCamera() else Toast.makeText(context, "Camera permission is needed to take a photo", Toast.LENGTH_LONG).show()
+    }
+
+    fun takePhoto() {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+            launchCamera()
+        } else {
+            AppLockManager.suppressNextLock()
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
     }
 
     // "Download": every page stacked top to bottom as one tall PNG, saved wherever the user chooses.
@@ -461,6 +475,9 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
             IconButton(onClick = { viewModel.redo() }, enabled = page.redo.isNotEmpty(), modifier = Modifier.size(44.dp)) {
                 Icon(Icons.Default.Redo, contentDescription = "Redo")
             }
+            IconButton(onClick = { takePhoto() }, modifier = Modifier.size(44.dp)) {
+                Icon(Icons.Default.PhotoCamera, contentDescription = "Take a photo")
+            }
             IconButton(onClick = { previewText = viewModel.combinedText(); onOverlay(HwOverlay.Preview) }, modifier = Modifier.size(44.dp)) {
                 Icon(Icons.Default.Fullscreen, contentDescription = "Full preview of all pages")
             }
@@ -507,14 +524,14 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
                     )
                     DropdownMenuItem(
                         text = { Text("Take a photo with the camera (fits this page)…") },
+                        onClick = { menuOpen = false; takePhoto() }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Insert a PDF (each page on its own screen)…") },
                         onClick = {
                             menuOpen = false
-                            if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
-                                launchCamera()
-                            } else {
-                                AppLockManager.suppressNextLock()
-                                cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
-                            }
+                            AppLockManager.suppressNextLock()
+                            pdfLauncher.launch(arrayOf("application/pdf"))
                         }
                     )
                     if (page.imagePath != null) {
@@ -555,7 +572,7 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
                 .padding(horizontal = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            val strip = when (val state = model) {
+            val strip = importStatus ?: when (val state = model) {
                 is ModelState.Checking -> "Preparing handwriting…"
                 is ModelState.Downloading -> "Downloading the English handwriting model (one time)…"
                 is ModelState.Failed -> state.message
@@ -572,7 +589,7 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
             )
             // Always takes its 16dp, spinning or not, so the text beside it never shifts.
             Box(modifier = Modifier.size(16.dp)) {
-                if (busy || fixingPage || model is ModelState.Checking || model is ModelState.Downloading) {
+                if (busy || fixingPage || importStatus != null || model is ModelState.Checking || model is ModelState.Downloading) {
                     CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
                 }
             }
