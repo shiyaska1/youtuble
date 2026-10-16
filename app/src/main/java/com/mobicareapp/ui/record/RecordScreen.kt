@@ -425,10 +425,8 @@ fun RecordScreen() {
             }
             if (active?.source == RecordingSource.CAMERA) {
                 Spacer(Modifier.height(4.dp))
-                val segmentSeconds = VideoRecordService.SEGMENT_DURATION_MS / 1000
-                val secondsUntilAutoSave = segmentSeconds - (elapsedSeconds % segmentSeconds)
                 Text(
-                    "Auto-saves as a file in ${formatElapsed(secondsUntilAutoSave)}, then every 5 min after",
+                    "One continuous video - tap Stop to save it. Keep this phone charged for long recordings.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

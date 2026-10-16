@@ -60,7 +60,6 @@ class VideoRecordService : Service() {
     /** Shared across every segment of one continuous recording, so a long session's parts are recognizable as belonging together (e.g. "VID_..._part2") rather than looking like unrelated clips. */
     private var sessionBaseName: String? = null
     private var segmentIndex = 1
-    private var rotationRunnable: Runnable? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -185,29 +184,10 @@ class VideoRecordService : Service() {
         }
     }
 
-    /**
-     * MediaRecorder only writes a playable file's final index (the MP4 "moov" atom) once stop()
-     * completes cleanly — if the app/phone dies mid-recording before that, the file is unplayable
-     * even though the raw video data was written the whole time. Rather than trying to make one
-     * MediaRecorder session safe against that (Android's APIs don't offer incremental finalizing),
-     * this periodically finishes the current segment as a complete, valid file and immediately
-     * starts a new one for the next stretch — so a crash mid-recording only costs the
-     * currently-in-progress segment, not everything recorded before it.
-     */
-    private fun scheduleSegmentRotation() {
-        val handler = cameraHandler ?: return
-        val runnable = Runnable { rotateSegment() }
-        rotationRunnable = runnable
-        handler.postDelayed(runnable, SEGMENT_DURATION_MS)
-    }
-
-    private fun rotateSegment() {
-        if (recorder == null) return // Already stopped for real by the time this fired.
-        val result = stopCurrentSegment()
-        segmentIndex++
-        serviceScope.launch { saveSegment(result, reportShortRecordingError = false) }
-        beginRecording(currentQuality, isNewSession = false)
-    }
+    // A video recording is now one continuous file from Start to Stop (it used to be cut into a new
+    // file every 5 minutes so that a crash would only lose the current stretch). MediaRecorder only
+    // writes a playable file's final index once stop() completes cleanly, so if the phone dies or the
+    // app is force-killed mid-recording, that recording is lost.
 
     /**
      * Builds (or rebuilds) the capture session against whatever surfaces exist right now: always
@@ -245,7 +225,6 @@ class VideoRecordService : Service() {
                         if (!recorderStarted) {
                             activeRecorder.start()
                             recorderStarted = true
-                            scheduleSegmentRotation()
                         }
                     } catch (e: Exception) {
                         onSessionFailure(e.message ?: "Couldn't start camera session")
@@ -373,8 +352,6 @@ class VideoRecordService : Service() {
     }
 
     private fun stopRecording() {
-        rotationRunnable?.let { cameraHandler?.removeCallbacks(it) }
-        rotationRunnable = null
         val result = stopCurrentSegment()
         releaseWakeLock()
         RecordingStatus.stopped()
@@ -391,7 +368,6 @@ class VideoRecordService : Service() {
     }
 
     private fun cleanupAfterFailure() {
-        rotationRunnable = null
         target?.let { RecordFileStore.abandon(this, it) }
         target = null
         pendingCaption = null
@@ -449,10 +425,6 @@ class VideoRecordService : Service() {
         private const val NOTIFICATION_ID = 52
         private const val ACTION_STOP = "com.mobicareapp.record.STOP_VIDEO"
         private const val EXTRA_QUALITY = "quality"
-        // 5 minutes — short enough that a crash mid-recording never costs much (and that it's
-        // actually observable within a normal test recording, not just in theory), while still not
-        // fragmenting a long session into an unwieldy number of files.
-        const val SEGMENT_DURATION_MS = 5 * 60 * 1000L
 
         /**
          * The running service, so the Record screen can hand it a preview surface while the app is
