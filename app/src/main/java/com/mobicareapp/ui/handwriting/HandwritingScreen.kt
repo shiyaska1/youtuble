@@ -1,6 +1,12 @@
 package com.mobicareapp.ui.handwriting
 
 import android.content.ClipData
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.filled.ZoomOut
+import androidx.compose.material.icons.filled.ZoomIn
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateCentroid
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.material3.FilterChip
 import androidx.compose.material.icons.filled.Keyboard
@@ -119,6 +125,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.isSpecified
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -254,7 +261,9 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
     var confirmDeletePage by remember { mutableStateOf(false) }
     var confirmNewNotepad by remember { mutableStateOf(false) }
     var fixingPage by remember { mutableStateOf(false) }
-    var scrollY by remember { mutableStateOf(0f) }
+    // Zoom (1 = the whole width) and how far the zoomed page is moved, in screen pixels.
+    var zoom by remember { mutableStateOf(1f) }
+    var pan by remember { mutableStateOf(Offset.Zero) }
     val snippets by viewModel.snippets.collectAsState()
     var uploadMessage by remember { mutableStateOf<String?>(null) }
     // "Read text from an area": while selecting, a finger drag draws a box instead of writing.
@@ -400,7 +409,7 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
     }
     // Nudge towards "Next page" once writing reaches the bottom edge.
     val pageFull = page.lowestY > pageRatio * 0.9f
-    LaunchedEffect(index) { scrollY = 0f }
+    LaunchedEffect(index) { zoom = 1f; pan = Offset.Zero }
 
     uploadMessage?.let { message ->
         AlertDialog(
@@ -740,8 +749,9 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
                 items = page.items,
                 image = pageImage,
                 pageRatio = pageRatio,
-                scrollY = scrollY,
-                onScroll = { scrollY = it },
+                zoom = zoom,
+                pan = pan,
+                onTransform = { newZoom, newPan -> zoom = newZoom; pan = newPan },
                 selecting = selecting,
                 onSelect = { from, to, canvas ->
                     selecting = false
@@ -773,6 +783,36 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
                 onStroke = { viewModel.addStroke(it) },
                 modifier = Modifier.fillMaxSize()
             )
+
+            // Zoom buttons (pinching with two fingers does the same): in, out, and back to the whole page.
+            val density = androidx.compose.ui.platform.LocalDensity.current
+            val widthPx = with(density) { maxWidth.toPx() }
+            val viewportHeightPx = with(density) { maxHeight.toPx() }
+            fun zoomTo(target: Float) {
+                val newZoom = target.coerceIn(1f, MAX_ZOOM)
+                // Zoom about the middle of what is showing.
+                val centre = Offset(widthPx / 2f, viewportHeightPx / 2f)
+                val pagePointAtCentre = (centre + pan) / zoom
+                pan = clampPan(pagePointAtCentre * newZoom - centre, newZoom, widthPx, widthPx * pageRatio, viewportHeightPx)
+                zoom = newZoom
+            }
+            Row(
+                modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp)
+                    .background(Color(0xCCFFFFFF), RoundedCornerShape(24.dp)),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = { zoomTo(zoom / 1.5f) }, enabled = zoom > 1f, modifier = Modifier.size(40.dp)) {
+                    Icon(Icons.Default.ZoomOut, contentDescription = "Zoom out")
+                }
+                Text(
+                    "${(zoom * 100).toInt()}%",
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.clickable(enabled = zoom > 1f) { zoomTo(1f) }.padding(horizontal = 2.dp)
+                )
+                IconButton(onClick = { zoomTo(zoom * 1.5f) }, enabled = zoom < MAX_ZOOM, modifier = Modifier.size(40.dp)) {
+                    Icon(Icons.Default.ZoomIn, contentDescription = "Zoom in")
+                }
+            }
             }
 
             readError?.let { message ->
@@ -1061,19 +1101,22 @@ private fun InsertSnippetDialog(
 /**
  * Plain paper that records strokes (one finger or stylus) and draws them as smooth curves.
  *
- * The page always uses the pad's full width, and is [pageRatio] times as tall. When the room is
- * shorter than the page (a split-screen window, a sideways phone) the page scrolls: put two fingers
- * on it together and move them up or down. A thin bar at the right edge shows where you are.
- * Everything here is in page coordinates (pixels at the pad's width), shifted by the scroll amount
- * only when drawing and when reading touches.
+ * The page always uses the pad's full width, and is [pageRatio] times as tall. Two fingers placed
+ * together zoom and move the page (pinch to zoom in and out, drag to move), like the Mark up image
+ * screen; one finger writes. At 1x with a window shorter than the page, moving two fingers up or
+ * down scrolls it. A thin bar at the right edge shows where you are on a page that doesn't fit.
+ *
+ * Everything recorded is in page coordinates (pixels at the pad's width at 1x). Zoom ([zoom]) and
+ * the shift ([pan], in screen pixels) only change how the page is drawn and how touches are mapped back onto it.
  */
 @Composable
 private fun HandwritingCanvas(
     items: List<PageItem>,
     image: ImageBitmap?,
     pageRatio: Float,
-    scrollY: Float,
-    onScroll: (Float) -> Unit,
+    zoom: Float,
+    pan: Offset,
+    onTransform: (Float, Offset) -> Unit,
     selecting: Boolean,
     onSelect: (Offset, Offset, IntSize) -> Unit,
     onStroke: (HwStroke) -> Unit,
@@ -1083,7 +1126,8 @@ private fun HandwritingCanvas(
     var live by remember { mutableStateOf<List<Offset>>(emptyList()) }
     var box by remember { mutableStateOf<Pair<Offset, Offset>?>(null) }
     val selectingNow by rememberUpdatedState(selecting)
-    val scrollNow by rememberUpdatedState(scrollY)
+    val zoomNow by rememberUpdatedState(zoom)
+    val panNow by rememberUpdatedState(pan)
     val ratioNow by rememberUpdatedState(pageRatio)
     val textMeasurer = rememberTextMeasurer()
 
@@ -1096,10 +1140,11 @@ private fun HandwritingCanvas(
                     val down = awaitFirstDown(requireUnconsumed = false)
                     val width = size.width.toFloat().coerceAtLeast(1f)
                     val pageHeight = width * ratioNow
-                    val maxScroll = (pageHeight - size.height).coerceAtLeast(0f)
-                    // Where a touch is on the page (not on the screen): shifted by the scroll, kept inside the page.
-                    fun pagePoint(p: Offset): Offset =
-                        Offset(p.x.coerceIn(0f, width), (p.y + scrollNow.coerceIn(0f, maxScroll)).coerceIn(0f, pageHeight))
+                    // Where a touch is on the page (not on the screen): undo the pan and zoom, keep it inside the page.
+                    fun pagePoint(p: Offset): Offset = Offset(
+                        ((p.x + panNow.x) / zoomNow).coerceIn(0f, width),
+                        ((p.y + panNow.y) / zoomNow).coerceIn(0f, pageHeight)
+                    )
 
                     if (selectingNow) {
                         val start = pagePoint(down.position)
@@ -1123,14 +1168,14 @@ private fun HandwritingCanvas(
                     val points = mutableListOf(InkPt(first.x / width, first.y / width, down.uptimeMillis))
                     live = listOf(first)
                     down.consume()
-                    var panStartY: Float? = null
+                    var twoFingers = false
                     while (true) {
                         val event = awaitPointerEvent()
                         val pressed = event.changes.filter { it.pressed }
-                        // A second finger that lands together with the first (within a moment) means "scroll the page",
+                        // A second finger that lands together with the first (within a moment) means "zoom/move the page",
                         // not "write". A second touch that comes later (a resting palm) is ignored.
                         if (pressed.size >= 2 && event.changes.maxOf { it.uptimeMillis } - down.uptimeMillis < TWO_FINGER_MS) {
-                            panStartY = pressed.map { it.position.y }.average().toFloat()
+                            twoFingers = true
                             event.changes.forEach { it.consume() }
                             break
                         }
@@ -1146,18 +1191,26 @@ private fun HandwritingCanvas(
                     }
                     live = emptyList()
 
-                    if (panStartY != null) {
-                        // Scrolling: the stroke that had started is dropped, and the fingers' average height moves the page.
-                        var lastY: Float = panStartY
-                        var scroll = scrollNow.coerceIn(0f, maxScroll)
+                    if (twoFingers) {
+                        // Zooming/moving: the stroke that had started is dropped. The point of the page under the
+                        // fingers stays under them while zooming, and the fingers' own movement pans the page.
+                        var z = zoomNow
+                        var p = panNow
                         while (true) {
                             val event = awaitPointerEvent()
-                            val pressed = event.changes.filter { it.pressed }
-                            if (pressed.isEmpty()) break
-                            val y = pressed.map { it.position.y }.average().toFloat()
-                            scroll = (scroll + (lastY - y)).coerceIn(0f, maxScroll)
-                            lastY = y
-                            onScroll(scroll)
+                            if (event.changes.none { it.pressed }) break
+                            if (event.changes.count { it.pressed } >= 2) {
+                                val zoomChange = event.calculateZoom()
+                                val panChange = event.calculatePan()
+                                val centroid = event.calculateCentroid(useCurrent = true)
+                                if (centroid.isSpecified) {
+                                    val newZoom = (z * zoomChange).coerceIn(1f, MAX_ZOOM)
+                                    val pagePointUnderFingers = ((centroid - panChange) + p) / z
+                                    p = clampPan(pagePointUnderFingers * newZoom - centroid, newZoom, width, pageHeight, size.height.toFloat())
+                                    z = newZoom
+                                    onTransform(z, p)
+                                }
+                            }
                             event.changes.forEach { it.consume() }
                         }
                         return@awaitEachGesture
@@ -1170,10 +1223,13 @@ private fun HandwritingCanvas(
             }
     ) {
         val pageHeight = size.width * pageRatio
-        val maxScroll = (pageHeight - size.height).coerceAtLeast(0f)
-        val scroll = scrollY.coerceIn(0f, maxScroll)
+        val z = zoom.coerceIn(1f, MAX_ZOOM)
+        val shift = clampPan(pan, z, size.width, pageHeight, size.height)
 
-        withTransform({ translate(0f, -scroll) }) {
+        withTransform({
+            translate(-shift.x, -shift.y)
+            scale(z, z, Offset.Zero)
+        }) {
             // The paper (the page's own height, which may be more or less than the room).
             drawRect(PaperColor, size = androidx.compose.ui.geometry.Size(size.width, pageHeight))
 
@@ -1215,14 +1271,15 @@ private fun HandwritingCanvas(
                 val topLeft = Offset(minOf(a.x, b.x), minOf(a.y, b.y))
                 val boxSize = androidx.compose.ui.geometry.Size(kotlin.math.abs(a.x - b.x), kotlin.math.abs(a.y - b.y))
                 drawRect(Color(0x331976D2), topLeft = topLeft, size = boxSize)
-                drawRect(Color(0xFF1976D2), topLeft = topLeft, size = boxSize, style = Stroke(width = 3f))
+                drawRect(Color(0xFF1976D2), topLeft = topLeft, size = boxSize, style = Stroke(width = 3f / z))
             }
         }
 
         // The bar at the right edge: shows the page is taller than the room, and which part is showing.
-        if (maxScroll > 0f) {
-            val barHeight = (size.height * size.height / pageHeight).coerceAtLeast(48f)
-            val barTop = (scroll / maxScroll) * (size.height - barHeight)
+        val maxShiftY = pageHeight * z - size.height
+        if (maxShiftY > 0f) {
+            val barHeight = (size.height * size.height / (pageHeight * z)).coerceAtLeast(48f)
+            val barTop = (shift.y / maxShiftY) * (size.height - barHeight)
             drawRoundRect(
                 Color(0x66455A64),
                 topLeft = Offset(size.width - 10f, barTop),
@@ -1233,7 +1290,16 @@ private fun HandwritingCanvas(
     }
 }
 
-/** Two touches landing within this many milliseconds of each other are one two-finger gesture (scroll), not writing plus a stray touch. */
+/** The most the page can be zoomed in. */
+internal const val MAX_ZOOM = 6f
+
+/** Keeps the zoomed page covering the room: no gap shows beside or above/below it. [pan] is the page's shift in screen pixels. */
+internal fun clampPan(pan: Offset, zoom: Float, width: Float, pageHeight: Float, viewportHeight: Float): Offset = Offset(
+    pan.x.coerceIn(0f, maxOf(0f, width * zoom - width)),
+    pan.y.coerceIn(0f, maxOf(0f, pageHeight * zoom - viewportHeight))
+)
+
+/** Two touches landing within this many milliseconds of each other are one two-finger gesture (zoom/move), not writing plus a stray touch. */
 private const val TWO_FINGER_MS = 120L
 
 /** Draws a stroke as one smooth curve: each touch point becomes a control point and the curve passes through the midpoints between them, which rounds off the jitter of a finger. */
