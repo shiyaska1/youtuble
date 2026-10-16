@@ -251,6 +251,7 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
     var panelOpen by remember { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
     var confirmClearPage by remember { mutableStateOf(false) }
+    var confirmDeletePage by remember { mutableStateOf(false) }
     var confirmNewNotepad by remember { mutableStateOf(false) }
     var fixingPage by remember { mutableStateOf(false) }
     var scrollY by remember { mutableStateOf(0f) }
@@ -501,6 +502,20 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
             dismissButton = { TextButton(onClick = { startChoiceDone = true }) { Text("Keep existing") } }
         )
     }
+    if (confirmDeletePage) {
+        AlertDialog(
+            onDismissRequest = { confirmDeletePage = false },
+            title = { Text("Delete this screen?") },
+            text = {
+                Text(
+                    if (pages.size > 1) "Screen ${index + 1} of ${pages.size} will be removed, with its writing, text and picture. The screens after it move up. This can't be undone."
+                    else "This is the only screen, so it will just be cleared."
+                )
+            },
+            confirmButton = { TextButton(onClick = { confirmDeletePage = false; viewModel.deletePage() }) { Text("Yes, delete") } },
+            dismissButton = { TextButton(onClick = { confirmDeletePage = false }) { Text("No") } }
+        )
+    }
     if (confirmClearPage) {
         AlertDialog(
             onDismissRequest = { confirmClearPage = false },
@@ -642,7 +657,11 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
                             HandwritingStore.setOpenAtStartup(context, openAtStartup)
                         }
                     )
-                    DropdownMenuItem(text = { Text("Clear this page") }, onClick = { menuOpen = false; confirmClearPage = true })
+                    DropdownMenuItem(text = { Text("Clear this screen (keep it, empty it)") }, onClick = { menuOpen = false; confirmClearPage = true })
+                    DropdownMenuItem(
+                        text = { Text("Delete this screen") },
+                        onClick = { menuOpen = false; confirmDeletePage = true }
+                    )
                     DropdownMenuItem(text = { Text("New notepad") }, onClick = { menuOpen = false; confirmNewNotepad = true })
                 }
             }

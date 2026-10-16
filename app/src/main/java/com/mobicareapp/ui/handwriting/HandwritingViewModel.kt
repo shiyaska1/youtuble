@@ -213,6 +213,27 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
         clearSuggestions()
     }
 
+    /**
+     * Removes the current screen from the notepad altogether (its writing, text and picture), so the
+     * screens after it move up by one. If it is the only screen, it is just cleared. Clear page, by
+     * contrast, empties a screen but keeps it.
+     */
+    fun deletePage() {
+        val index = _pageIndex.value
+        val pages = _pages.value
+        if (index !in pages.indices) return
+        pages[index].imagePath?.let { File(it).delete() }
+        recognizeJobs.values.forEach { it.cancel() }
+        recognizeJobs.clear()
+        val remaining = pages.filterIndexed { i, _ -> i != index }.ifEmpty { listOf(HwPage()) }
+        _pages.value = remaining
+        _pageIndex.value = index.coerceIn(0, remaining.lastIndex)
+        clearSuggestions()
+        persist()
+        // The screens after the deleted one changed number, so any reading that was waiting is redone for the right screen.
+        remaining.forEachIndexed { i, pg -> if (pg.items.isNotEmpty() && pg.text.isBlank() && !pg.textEdited) scheduleRecognition(i, 0) }
+    }
+
     /** Wipes every page and starts a fresh notepad. */
     fun newNotepad() {
         recognizeJobs.values.forEach { it.cancel() }
