@@ -97,6 +97,15 @@ object HandwritingStore {
     private const val PREFS = "handwriting_prefs"
     private const val KEY_AUTO_FIX = "auto_fix"
     private const val KEY_OPEN_AT_STARTUP = "open_at_startup"
+    private const val KEY_PAGE_RATIO = "page_ratio"
+
+    /** Every page's height divided by its width. Fixed once measured (and only ever made taller), so pages keep one shape whichever way the phone is held. */
+    fun pageRatio(context: Context): Float =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getFloat(KEY_PAGE_RATIO, 1.8f)
+
+    fun setPageRatio(context: Context, ratio: Float) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putFloat(KEY_PAGE_RATIO, ratio).apply()
+    }
 
     fun isAutoFixEnabled(context: Context): Boolean =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_AUTO_FIX, true)

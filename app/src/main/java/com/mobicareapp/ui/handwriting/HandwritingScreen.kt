@@ -48,6 +48,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.CardDefaults
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.WindowInsets
 import android.view.WindowManager
 import android.os.Build
@@ -104,6 +105,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -682,6 +684,12 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
 
         // The writing pad: everything that's left of the screen.
         Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+            // The page is drawn at its own fixed shape, centred in the room available (a margin shows
+            // when the phone is sideways), so writing never gets cut off or stretched.
+            BoxWithConstraints(modifier = Modifier.fillMaxSize().background(Color(0xFFE6E3D8))) {
+                val pageRatio by viewModel.pageRatioFlow.collectAsState()
+                LaunchedEffect(maxWidth, maxHeight) { viewModel.noteViewportRatio(maxHeight.value / maxWidth.value) }
+                val pageWidth = minOf(maxWidth, maxHeight / pageRatio)
             HandwritingCanvas(
                 items = page.items,
                 image = pageImage,
@@ -714,9 +722,10 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
                     }
                 },
                 onStroke = { viewModel.addStroke(it) },
-                onSize = { ratio -> canvasRatio = ratio; viewModel.pageRatio = ratio },
-                modifier = Modifier.fillMaxSize()
+                onSize = { ratio -> canvasRatio = ratio },
+                modifier = Modifier.align(Alignment.Center).size(pageWidth, pageWidth * pageRatio)
             )
+            }
 
             readError?.let { message ->
                 Text(

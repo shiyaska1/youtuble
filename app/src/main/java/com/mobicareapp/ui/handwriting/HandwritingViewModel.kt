@@ -89,8 +89,24 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
     private val _noteId = MutableStateFlow<Long?>(null)
     val currentNoteId: StateFlow<Long?> = _noteId.asStateFlow()
 
-    /** A page's height divided by its width on this phone's pad (set by the screen) — used to draw pages the same shape when exporting. */
-    @Volatile var pageRatio = 1.8f
+    private val _pageRatio = MutableStateFlow(HandwritingStore.pageRatio(application))
+    /** The shape of every page (height divided by width). The pad shows each page at this shape, and the export draws it the same, so nothing is cut off. */
+    val pageRatioFlow: StateFlow<Float> = _pageRatio.asStateFlow()
+    val pageRatio: Float get() = _pageRatio.value
+
+    /**
+     * The pad reports the shape of the room it has. Only an upright (taller than wide) measurement
+     * counts, and the page only ever gets taller, never shorter: a sideways phone, or a shorter screen
+     * for a moment, must not shrink the page under writing that is already on it.
+     */
+    fun noteViewportRatio(measured: Float) {
+        if (measured <= 1f) return
+        val ratio = maxOf(_pageRatio.value, measured.coerceAtMost(4f))
+        if (ratio > _pageRatio.value + 0.001f) {
+            _pageRatio.value = ratio
+            HandwritingStore.setPageRatio(context, ratio)
+        }
+    }
 
     /** Why the last attempt to read the handwriting failed, if it did — shown under the text panel instead of failing silently. */
     private val _readError = MutableStateFlow<String?>(null)
