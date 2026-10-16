@@ -225,6 +225,7 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
     val readError by viewModel.readError.collectAsState()
     val currentNoteId by viewModel.currentNoteId.collectAsState()
     val importStatus by viewModel.importStatus.collectAsState()
+    val pageRatio by viewModel.pageRatioFlow.collectAsState()
 
     // The notepad is saved to disk, but locking would still swap this screen out mid-sentence.
     DisposableEffect(Unit) {
@@ -252,7 +253,7 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
     var confirmClearPage by remember { mutableStateOf(false) }
     var confirmNewNotepad by remember { mutableStateOf(false) }
     var fixingPage by remember { mutableStateOf(false) }
-    var canvasRatio by remember { mutableStateOf(1.8f) }
+    var scrollY by remember { mutableStateOf(0f) }
     val snippets by viewModel.snippets.collectAsState()
     var uploadMessage by remember { mutableStateOf<String?>(null) }
     // "Read text from an area": while selecting, a finger drag draws a box instead of writing.
@@ -397,7 +398,8 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
         value = page.imagePath?.let { path -> withContext(Dispatchers.IO) { runCatching { BitmapFactory.decodeFile(path)?.asImageBitmap() }.getOrNull() } }
     }
     // Nudge towards "Next page" once writing reaches the bottom edge.
-    val pageFull = page.lowestY > canvasRatio * 0.9f
+    val pageFull = page.lowestY > pageRatio * 0.9f
+    LaunchedEffect(index) { scrollY = 0f }
 
     uploadMessage?.let { message ->
         AlertDialog(
@@ -711,15 +713,16 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
 
         // The writing pad: everything that's left of the screen.
         Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-            // The page is drawn at its own fixed shape, centred in the room available (a margin shows
-            // when the phone is sideways), so writing never gets cut off or stretched.
-            BoxWithConstraints(modifier = Modifier.fillMaxSize().background(Color(0xFFE6E3D8))) {
-                val pageRatio by viewModel.pageRatioFlow.collectAsState()
+            // The page always uses the full width of the pad; if the room is shorter than the page (a
+            // split-screen window, a sideways phone), the page scrolls with two fingers.
+            BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
                 LaunchedEffect(maxWidth, maxHeight) { viewModel.noteViewportRatio(maxHeight.value / maxWidth.value) }
-                val pageWidth = minOf(maxWidth, maxHeight / pageRatio)
             HandwritingCanvas(
                 items = page.items,
                 image = pageImage,
+                pageRatio = pageRatio,
+                scrollY = scrollY,
+                onScroll = { scrollY = it },
                 selecting = selecting,
                 onSelect = { from, to, canvas ->
                     selecting = false
@@ -749,8 +752,7 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
                     }
                 },
                 onStroke = { viewModel.addStroke(it) },
-                onSize = { ratio -> canvasRatio = ratio },
-                modifier = Modifier.align(Alignment.Center).size(pageWidth, pageWidth * pageRatio)
+                modifier = Modifier.fillMaxSize()
             )
             }
 
@@ -1037,116 +1039,183 @@ private fun InsertSnippetDialog(
     )
 }
 
-/** Plain paper that records strokes (one finger or stylus) and draws them as smooth curves. */
+/**
+ * Plain paper that records strokes (one finger or stylus) and draws them as smooth curves.
+ *
+ * The page always uses the pad's full width, and is [pageRatio] times as tall. When the room is
+ * shorter than the page (a split-screen window, a sideways phone) the page scrolls: put two fingers
+ * on it together and move them up or down. A thin bar at the right edge shows where you are.
+ * Everything here is in page coordinates (pixels at the pad's width), shifted by the scroll amount
+ * only when drawing and when reading touches.
+ */
 @Composable
 private fun HandwritingCanvas(
     items: List<PageItem>,
     image: ImageBitmap?,
+    pageRatio: Float,
+    scrollY: Float,
+    onScroll: (Float) -> Unit,
     selecting: Boolean,
     onSelect: (Offset, Offset, IntSize) -> Unit,
     onStroke: (HwStroke) -> Unit,
-    onSize: (Float) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    // The stroke being drawn, and the box being dragged while choosing an area to read (page coordinates).
     var live by remember { mutableStateOf<List<Offset>>(emptyList()) }
-    // The box being dragged while choosing an area to read (corner to corner).
     var box by remember { mutableStateOf<Pair<Offset, Offset>?>(null) }
     val selectingNow by rememberUpdatedState(selecting)
+    val scrollNow by rememberUpdatedState(scrollY)
+    val ratioNow by rememberUpdatedState(pageRatio)
     val textMeasurer = rememberTextMeasurer()
 
     Canvas(
         modifier = modifier
             .clipToBounds()
-            .background(PaperColor)
-            .onSizeChanged { if (it.width > 0) onSize(it.height.toFloat() / it.width) }
+            .background(Color(0xFFE6E3D8))
             .pointerInput(Unit) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
                     val width = size.width.toFloat().coerceAtLeast(1f)
+                    val pageHeight = width * ratioNow
+                    val maxScroll = (pageHeight - size.height).coerceAtLeast(0f)
+                    // Where a touch is on the page (not on the screen): shifted by the scroll, kept inside the page.
+                    fun pagePoint(p: Offset): Offset =
+                        Offset(p.x.coerceIn(0f, width), (p.y + scrollNow.coerceIn(0f, maxScroll)).coerceIn(0f, pageHeight))
+
                     if (selectingNow) {
-                        val start = down.position
+                        val start = pagePoint(down.position)
                         var end = start
                         box = start to end
                         down.consume()
                         while (true) {
                             val event = awaitPointerEvent()
                             val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                            end = Offset(change.position.x.coerceIn(0f, width), change.position.y.coerceIn(0f, size.height.toFloat()))
+                            end = pagePoint(change.position)
                             box = start to end
                             change.consume()
                             if (!change.pressed) break
                         }
                         box = null
-                        onSelect(start, end, size)
+                        onSelect(start, end, IntSize(width.toInt(), pageHeight.toInt()))
                         return@awaitEachGesture
                     }
-                    val maxY = size.height.toFloat()
-                    val points = mutableListOf(InkPt(down.position.x / width, down.position.y / width, down.uptimeMillis))
-                    live = listOf(down.position)
+
+                    val first = pagePoint(down.position)
+                    val points = mutableListOf(InkPt(first.x / width, first.y / width, down.uptimeMillis))
+                    live = listOf(first)
                     down.consume()
+                    var panStartY: Float? = null
                     while (true) {
                         val event = awaitPointerEvent()
-                        // Only the finger/stylus that started this stroke; a second touch (a resting palm) is ignored.
+                        val pressed = event.changes.filter { it.pressed }
+                        // A second finger that lands together with the first (within a moment) means "scroll the page",
+                        // not "write". A second touch that comes later (a resting palm) is ignored.
+                        if (pressed.size >= 2 && event.changes.maxOf { it.uptimeMillis } - down.uptimeMillis < TWO_FINGER_MS) {
+                            panStartY = pressed.map { it.position.y }.average().toFloat()
+                            event.changes.forEach { it.consume() }
+                            break
+                        }
                         val change = event.changes.firstOrNull { it.id == down.id } ?: break
                         if (!change.pressed) {
                             change.consume()
                             break
                         }
-                        // A finger that slides off the page keeps drawing along its edge instead of outside it.
-                        val inside = Offset(change.position.x.coerceIn(0f, width), change.position.y.coerceIn(0f, maxY))
+                        val inside = pagePoint(change.position)
                         points += InkPt(inside.x / width, inside.y / width, change.uptimeMillis)
                         live = live + inside
                         change.consume()
                     }
                     live = emptyList()
+
+                    if (panStartY != null) {
+                        // Scrolling: the stroke that had started is dropped, and the fingers' average height moves the page.
+                        var lastY: Float = panStartY
+                        var scroll = scrollNow.coerceIn(0f, maxScroll)
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val pressed = event.changes.filter { it.pressed }
+                            if (pressed.isEmpty()) break
+                            val y = pressed.map { it.position.y }.average().toFloat()
+                            scroll = (scroll + (lastY - y)).coerceIn(0f, maxScroll)
+                            lastY = y
+                            onScroll(scroll)
+                            event.changes.forEach { it.consume() }
+                        }
+                        return@awaitEachGesture
+                    }
+
                     // A tap becomes a dot (a full stop, the dot of an "i"): two identical points so it has a direction.
                     if (points.size == 1) points += points.first().copy(t = points.first().t + 1)
                     onStroke(HwStroke(points))
                 }
             }
     ) {
-        // An inserted photo: scaled to fit the whole pad (nothing cropped), centred, behind the writing.
-        if (image != null) {
-            val scale = minOf(size.width / image.width, size.height / image.height)
-            val w = (image.width * scale).toInt()
-            val h = (image.height * scale).toInt()
-            drawImage(
-                image,
-                dstOffset = IntOffset(((size.width - w) / 2f).toInt(), ((size.height - h) / 2f).toInt()),
-                dstSize = IntSize(w, h)
-            )
-        }
+        val pageHeight = size.width * pageRatio
+        val maxScroll = (pageHeight - size.height).coerceAtLeast(0f)
+        val scroll = scrollY.coerceIn(0f, maxScroll)
 
-        val inkWidth = size.width * INK_WIDTH
-        items.forEach { item ->
-            when (item) {
-                is InkItem -> drawInk(item.stroke.points.map { Offset(it.x * size.width, it.y * size.width) }, inkWidth)
-                // A word completed from a suggestion, set in a handwriting-style font where the unfinished word was.
-                is WordItem -> {
-                    val layout = textMeasurer.measure(
-                        item.text,
-                        TextStyle(fontSize = (item.size * size.width * 1.15f).toSp(), fontFamily = FontFamily.Cursive, color = InkColor)
-                    )
-                    // The word starts at its baseline's left end and runs at the same angle as the writing it replaced.
-                    withTransform({
-                        translate(item.x * size.width, item.y * size.width)
-                        rotate(Math.toDegrees(item.angle.toDouble()).toFloat(), Offset.Zero)
-                    }) {
-                        drawText(layout, topLeft = Offset(0f, -layout.firstBaseline))
+        withTransform({ translate(0f, -scroll) }) {
+            // The paper (the page's own height, which may be more or less than the room).
+            drawRect(PaperColor, size = androidx.compose.ui.geometry.Size(size.width, pageHeight))
+
+            // An inserted photo: scaled to fit the whole page (nothing cropped), centred, behind the writing.
+            if (image != null) {
+                val scale = minOf(size.width / image.width, pageHeight / image.height)
+                val w = (image.width * scale).toInt()
+                val h = (image.height * scale).toInt()
+                drawImage(
+                    image,
+                    dstOffset = IntOffset(((size.width - w) / 2f).toInt(), ((pageHeight - h) / 2f).toInt()),
+                    dstSize = IntSize(w, h)
+                )
+            }
+
+            val inkWidth = size.width * INK_WIDTH
+            items.forEach { item ->
+                when (item) {
+                    is InkItem -> drawInk(item.stroke.points.map { Offset(it.x * size.width, it.y * size.width) }, inkWidth)
+                    // A word completed from a suggestion, set in a handwriting-style font where the unfinished word was.
+                    is WordItem -> {
+                        val layout = textMeasurer.measure(
+                            item.text,
+                            TextStyle(fontSize = (item.size * size.width * 1.15f).toSp(), fontFamily = FontFamily.Cursive, color = InkColor)
+                        )
+                        // The word starts at its baseline's left end and runs at the same angle as the writing it replaced.
+                        withTransform({
+                            translate(item.x * size.width, item.y * size.width)
+                            rotate(Math.toDegrees(item.angle.toDouble()).toFloat(), Offset.Zero)
+                        }) {
+                            drawText(layout, topLeft = Offset(0f, -layout.firstBaseline))
+                        }
                     }
                 }
             }
-        }
-        drawInk(live, inkWidth)
+            drawInk(live, inkWidth)
 
-        box?.let { (a, b) ->
-            val topLeft = Offset(minOf(a.x, b.x), minOf(a.y, b.y))
-            val boxSize = androidx.compose.ui.geometry.Size(kotlin.math.abs(a.x - b.x), kotlin.math.abs(a.y - b.y))
-            drawRect(Color(0x331976D2), topLeft = topLeft, size = boxSize)
-            drawRect(Color(0xFF1976D2), topLeft = topLeft, size = boxSize, style = Stroke(width = 3f))
+            box?.let { (a, b) ->
+                val topLeft = Offset(minOf(a.x, b.x), minOf(a.y, b.y))
+                val boxSize = androidx.compose.ui.geometry.Size(kotlin.math.abs(a.x - b.x), kotlin.math.abs(a.y - b.y))
+                drawRect(Color(0x331976D2), topLeft = topLeft, size = boxSize)
+                drawRect(Color(0xFF1976D2), topLeft = topLeft, size = boxSize, style = Stroke(width = 3f))
+            }
+        }
+
+        // The bar at the right edge: shows the page is taller than the room, and which part is showing.
+        if (maxScroll > 0f) {
+            val barHeight = (size.height * size.height / pageHeight).coerceAtLeast(48f)
+            val barTop = (scroll / maxScroll) * (size.height - barHeight)
+            drawRoundRect(
+                Color(0x66455A64),
+                topLeft = Offset(size.width - 10f, barTop),
+                size = androidx.compose.ui.geometry.Size(6f, barHeight),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(3f, 3f)
+            )
         }
     }
 }
+
+/** Two touches landing within this many milliseconds of each other are one two-finger gesture (scroll), not writing plus a stray touch. */
+private const val TWO_FINGER_MS = 120L
 
 /** Draws a stroke as one smooth curve: each touch point becomes a control point and the curve passes through the midpoints between them, which rounds off the jitter of a finger. */
 private fun DrawScope.drawInk(points: List<Offset>, width: Float) {
