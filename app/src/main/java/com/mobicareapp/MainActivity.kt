@@ -46,7 +46,6 @@ import androidx.fragment.app.FragmentActivity
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
-import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.mobicareapp.applock.AppLockManager
 import com.mobicareapp.applock.AppLockScreen
@@ -56,7 +55,6 @@ import com.mobicareapp.handwriting.HandwritingStartup
 import com.mobicareapp.handwriting.HandwritingStore
 import com.mobicareapp.ui.home.HomeScreen
 import com.mobicareapp.ui.library.LibraryScreen
-import com.mobicareapp.ui.nav.ContactBanner
 import com.mobicareapp.ui.player.PipState
 import com.mobicareapp.ui.browser.BrowserScreen
 import com.mobicareapp.ui.browser.openInBrowse
@@ -182,7 +180,6 @@ private fun AppRoot(activity: FragmentActivity) {
 
     val navController = rememberNavController()
     var videoRequest by remember { mutableStateOf<VideoQueueRequest?>(null) }
-    var playerFullscreen by remember { mutableStateOf(false) }
     // Hoisted above "main" (rather than local to MainScaffold) so it survives that composable
     // being torn down and rebuilt when the player/browser destinations are pushed on top of it —
     // otherwise it always reset to tab 0 on the way back, regardless of which tab was open before
@@ -199,16 +196,8 @@ private fun AppRoot(activity: FragmentActivity) {
     LaunchedEffect(Unit) {
         if (HandwritingStartup.isRequested() && PendingQuickRecordAction.pending.value == null) selectedTab = 2
     }
-    val isInPip by PipState.isInPip.collectAsState()
-    // Derived from the back stack (rather than toggled only from onBack callbacks) so it also
-    // reacts correctly to the system/gesture back button, not just this screen's own back arrow.
-    val currentRoute = navController.currentBackStackEntryAsState().value?.destination?.route
-    val bannerVisible = !playerFullscreen && !isInPip && currentRoute != "browser"
 
     Column(modifier = Modifier.fillMaxSize()) {
-        if (bannerVisible) {
-            ContactBanner()
-        }
         Box(modifier = Modifier.weight(1f)) {
             NavHost(navController, startDestination = "main") {
                 composable("main") {
@@ -248,7 +237,7 @@ private fun AppRoot(activity: FragmentActivity) {
                                 selectedTab = 1
                                 navController.popBackStack()
                             },
-                            onFullscreenChange = { fullscreen -> playerFullscreen = fullscreen }
+                            onFullscreenChange = { }
                         )
                     }
                 }
