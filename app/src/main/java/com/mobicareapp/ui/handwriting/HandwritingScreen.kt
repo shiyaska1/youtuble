@@ -291,6 +291,9 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
     val pdfLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) viewModel.insertPdf(uri)
     }
+    val videoLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) viewModel.transcribeVideo(uri)
+    }
     fun launchCamera() {
         val dir = File(context.getExternalFilesDir(null), "HandwritingCamera").apply { mkdirs() }
         val file = File(dir, "camera_${System.currentTimeMillis()}.jpg")
@@ -634,6 +637,14 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
                     DropdownMenuItem(
                         text = { Text("Pick a voice recording and put its text on the blank screen…") },
                         onClick = { menuOpen = false; showVoicePicker = true }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Pick a video and transcribe its voice…") },
+                        onClick = {
+                            menuOpen = false
+                            AppLockManager.suppressNextLock()
+                            videoLauncher.launch(arrayOf("video/*"))
+                        }
                     )
                     DropdownMenuItem(
                         text = { Text("Insert a PDF (each page on its own screen)…") },

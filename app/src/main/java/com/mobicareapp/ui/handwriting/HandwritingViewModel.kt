@@ -731,6 +731,51 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
             .onFailure { _readError.value = "Couldn't read that PDF" }
     }
 
+    // --- the voice of a video ---------------------------------------------------------------------
+
+    /** Picks a video from the phone: its sound is taken out and transcribed, and the text goes on the latest blank screen. */
+    fun transcribeVideo(uri: Uri) {
+        if (_importStatus.value != null) return
+        viewModelScope.launch {
+            _importStatus.value = "Opening the video…"
+            val copy = withContext(Dispatchers.IO) {
+                runCatching {
+                    val dir = File(context.cacheDir, "shared_inbox").apply { mkdirs() }
+                    val file = File(dir, "video_${System.nanoTime()}.mp4")
+                    context.contentResolver.openInputStream(uri)?.use { input -> file.outputStream().use { input.copyTo(it) } } ?: error("unreadable")
+                    file
+                }.getOrNull()
+            }
+            _importStatus.value = null
+            if (copy == null) _readError.value = "Couldn't open that video" else transcribeVideoFile(copy, firstBlank = false)
+        }
+    }
+
+    /**
+     * Takes the sound out of [video] (just the audio, mono and small, so it uploads quickly), transcribes
+     * it, and puts the text on a blank screen. The video file given here is deleted afterwards.
+     */
+    private suspend fun transcribeVideoFile(video: File, firstBlank: Boolean) {
+        _importStatus.value = "Taking the voice out of the video…"
+        val audio = withContext(Dispatchers.IO) {
+            runCatching {
+                val out = File(video.parentFile, "voice_${System.nanoTime()}.m4a")
+                val session = com.arthenica.ffmpegkit.FFmpegKit.execute(
+                    "-y -i \"${video.absolutePath}\" -vn -ac 1 -ar 22050 -c:a aac -b:a 48k \"${out.absolutePath}\""
+                )
+                if (com.arthenica.ffmpegkit.ReturnCode.isSuccess(session.returnCode) && out.length() > 0) out else { out.delete(); null }
+            }.getOrNull()
+        }
+        video.delete()
+        _importStatus.value = null
+        if (audio == null) {
+            _readError.value = "Couldn't get any sound from that video (does it have a sound track?)"
+            return
+        }
+        transcribeNow(audio, firstBlank)
+        audio.delete()
+    }
+
     // --- content shared from other apps -------------------------------------------------------------
 
     /**
@@ -748,6 +793,7 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
                         transcribeNow(item.file, firstBlank = true)
                         item.file.delete()
                     }
+                    mime.startsWith("video/") -> transcribeVideoFile(item.file, firstBlank = true)
                     mime.startsWith("image/") -> insertImagesNow(listOf(Uri.fromFile(item.file)), deleteSourceFiles = true, startIndex = null)
                     mime == "application/pdf" -> {
                         insertPdfNow(Uri.fromFile(item.file), startIndex = null)
