@@ -1,6 +1,19 @@
 package com.mobicareapp.ui.handwriting
 
 import android.content.ClipData
+import kotlinx.coroutines.delay
+import com.mobicareapp.ui.transcribe.TranscribePickerDialog
+import com.mobicareapp.transcribe.TranscriptionRouter
+import com.mobicareapp.transcribe.TranscribeSettings
+import com.mobicareapp.record.RecordingStatus
+import com.mobicareapp.record.RecordingSource
+import com.mobicareapp.record.AudioRecordService
+import com.mobicareapp.questionpaper.QuestionPaperSettings
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.filled.ZoomOut
 import androidx.compose.material.icons.filled.ZoomIn
@@ -967,16 +980,101 @@ private suspend fun readTextInArea(
 }
 
 /**
- * Type text on the keyboard and choose how big it is; it goes onto the page in the handwriting-style
- * font. The window takes the whole screen above the keyboard, with a big text box that grows with
- * the chosen font size, so a lot can be typed and read comfortably.
+ * Type text on the keyboard (or speak it) and choose how big it is; it goes onto the page in the
+ * handwriting-style font. The window takes the whole screen above the keyboard, with a big text box
+ * that grows with the chosen font size, so a lot can be typed and read comfortably.
+ *
+ * "Voice" opens the tools to record your voice here (start/stop; the recording is saved in the
+ * Library too) or to pick a recording you already have; either is transcribed with the engine you
+ * choose, and the text lands in the box, where it can be corrected before Insert.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun TypeTextDialog(onInsert: (String, Float) -> Unit, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var text by remember { mutableStateOf("") }
     var size by remember { mutableStateOf(0.075f) }
     val focus = remember { androidx.compose.ui.focus.FocusRequester() }
     LaunchedEffect(Unit) { runCatching { focus.requestFocus() } } // opens the keyboard straight away
+
+    // --- voice tools ---
+    var showVoice by remember { mutableStateOf(false) }
+    var showPicker by remember { mutableStateOf(false) }
+    var engine by remember { mutableStateOf(TranscribeSettings.getEngine(context)) }
+    var voiceStatus by remember { mutableStateOf<String?>(null) }
+    var voiceError by remember { mutableStateOf<String?>(null) }
+    var keyInput by remember { mutableStateOf("") }
+    var keyVersion by remember { mutableStateOf(0) }
+    // Set when Stop was pressed here, so the next finished recording is the one to transcribe.
+    var waitingForRecording by remember { mutableStateOf(false) }
+
+    val active by RecordingStatus.active.collectAsState()
+    val finished by RecordingStatus.lastFinished.collectAsState()
+    val recordingHere = active?.type == com.mobicareapp.data.MediaType.AUDIO && active?.source == RecordingSource.MIC
+    var elapsed by remember { mutableStateOf(0L) }
+    LaunchedEffect(recordingHere) {
+        while (recordingHere) {
+            elapsed = (System.currentTimeMillis() - (active?.startedAtMillis ?: System.currentTimeMillis())) / 1000
+            delay(500)
+        }
+    }
+
+    fun keyFor(e: TranscribeSettings.Engine): String? = when (e) {
+        TranscribeSettings.Engine.GEMINI -> QuestionPaperSettings.getApiKey(context)
+        TranscribeSettings.Engine.GROQ -> TranscribeSettings.getGroqKey(context)
+        TranscribeSettings.Engine.SARVAM -> TranscribeSettings.getSarvamKey(context)
+        TranscribeSettings.Engine.ASSEMBLYAI -> TranscribeSettings.getApiKey(context)
+    }
+    val hasKey = remember(engine, keyVersion) { keyFor(engine) != null }
+
+    // Transcribes [file] with the chosen engine and adds the words to the box.
+    fun transcribe(file: File) {
+        voiceError = null
+        voiceStatus = "Transcribing…"
+        scope.launch {
+            val result = TranscriptionRouter.transcribe(context, file, "en") { status -> voiceStatus = status }
+            voiceStatus = null
+            result
+                .onSuccess { heard ->
+                    if (heard.isBlank()) voiceError = "No speech was recognized"
+                    else text = if (text.isBlank()) heard.trim() else text.trimEnd() + " " + heard.trim()
+                }
+                .onFailure { e -> voiceError = e.message ?: "Couldn't transcribe that" }
+        }
+    }
+
+    // The recording that was just stopped here has been saved: transcribe it.
+    LaunchedEffect(finished) {
+        val done = finished
+        if (waitingForRecording && done != null && done.type == com.mobicareapp.data.MediaType.AUDIO) {
+            waitingForRecording = false
+            transcribe(File(done.filePath))
+        }
+    }
+
+    val micPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) AudioRecordService.start(context)
+        else voiceError = "Microphone permission is needed to record"
+    }
+    fun startRecording() {
+        voiceError = null
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            AudioRecordService.start(context)
+        } else {
+            AppLockManager.suppressNextLock()
+            micPermission.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
+    if (showPicker) {
+        // Recordings already in the Library, or any audio file on the phone.
+        TranscribePickerDialog(
+            onDismiss = { showPicker = false },
+            onPick = { file -> showPicker = false; transcribe(file) }
+        )
+    }
+
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(
             modifier = Modifier.fillMaxSize().padding(8.dp),
@@ -984,7 +1082,15 @@ private fun TypeTextDialog(onInsert: (String, Float) -> Unit, onDismiss: () -> U
             color = MaterialTheme.colorScheme.surface
         ) {
             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("Type text", style = MaterialTheme.typography.headlineSmall)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Type text", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
+                    OutlinedButton(onClick = { showVoice = !showVoice }) {
+                        Icon(Icons.Default.Mic, contentDescription = null, modifier = Modifier.size(20.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(if (showVoice) "Hide voice" else "Voice", style = MaterialTheme.typography.titleMedium)
+                    }
+                }
+
                 // The box takes all the room that is left, so a long text can be typed and read.
                 OutlinedTextField(
                     value = text,
@@ -999,20 +1105,93 @@ private fun TypeTextDialog(onInsert: (String, Float) -> Unit, onDismiss: () -> U
                     label = { Text("Text") },
                     modifier = Modifier.weight(1f).fillMaxWidth().focusRequester(focus)
                 )
+
+                if (showVoice) {
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                if (recordingHere) {
+                                    Button(
+                                        onClick = {
+                                            waitingForRecording = true
+                                            voiceStatus = "Saving the recording…"
+                                            AudioRecordService.stop(context)
+                                        },
+                                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                                    ) {
+                                        Icon(Icons.Default.Stop, contentDescription = null, modifier = Modifier.size(20.dp))
+                                        Spacer(Modifier.width(6.dp))
+                                        Text("Stop  %d:%02d".format(elapsed / 60, elapsed % 60), style = MaterialTheme.typography.titleMedium)
+                                    }
+                                } else {
+                                    Button(onClick = { startRecording() }, enabled = voiceStatus == null && hasKey) {
+                                        Icon(Icons.Default.Mic, contentDescription = null, modifier = Modifier.size(20.dp))
+                                        Spacer(Modifier.width(6.dp))
+                                        Text("Record", style = MaterialTheme.typography.titleMedium)
+                                    }
+                                    OutlinedButton(onClick = { showPicker = true }, enabled = voiceStatus == null && hasKey) {
+                                        Text("Pick a recorded voice", style = MaterialTheme.typography.titleMedium)
+                                    }
+                                }
+                            }
+                            Text("Transcribe with", style = MaterialTheme.typography.labelLarge)
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                listOf(
+                                    "Gemini" to TranscribeSettings.Engine.GEMINI,
+                                    "Groq" to TranscribeSettings.Engine.GROQ,
+                                    "Sarvam" to TranscribeSettings.Engine.SARVAM,
+                                    "AssemblyAI" to TranscribeSettings.Engine.ASSEMBLYAI
+                                ).forEach { (label, value) ->
+                                    FilterChip(
+                                        selected = engine == value,
+                                        onClick = { engine = value; TranscribeSettings.setEngine(context, value); keyInput = "" },
+                                        label = { Text(label, style = MaterialTheme.typography.titleMedium) }
+                                    )
+                                }
+                            }
+                            // The chosen engine has no key yet: ask for it right here.
+                            if (!hasKey) {
+                                OutlinedTextField(
+                                    value = keyInput,
+                                    onValueChange = { keyInput = it },
+                                    singleLine = true,
+                                    label = { Text("API key for this engine") },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                TextButton(
+                                    enabled = keyInput.isNotBlank(),
+                                    onClick = {
+                                        when (engine) {
+                                            TranscribeSettings.Engine.GEMINI -> QuestionPaperSettings.setApiKey(context, keyInput)
+                                            TranscribeSettings.Engine.GROQ -> TranscribeSettings.setGroqKey(context, keyInput)
+                                            TranscribeSettings.Engine.SARVAM -> TranscribeSettings.setSarvamKey(context, keyInput)
+                                            TranscribeSettings.Engine.ASSEMBLYAI -> TranscribeSettings.setApiKey(context, keyInput)
+                                        }
+                                        keyInput = ""
+                                        keyVersion++
+                                    }
+                                ) { Text("Save key", style = MaterialTheme.typography.titleMedium) }
+                            }
+                            voiceStatus?.let { Text(it, style = MaterialTheme.typography.bodyLarge) }
+                            voiceError?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error) }
+                            Text(
+                                "A recording made here is saved in the Library too.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+
                 Text("Font size on the page", style = MaterialTheme.typography.labelLarge)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf("Normal" to 0.045f, "Big" to 0.075f, "Extra big" to 0.11f).forEach { (label, value) ->
                         FilterChip(selected = size == value, onClick = { size = value }, label = { Text(label, style = MaterialTheme.typography.titleMedium) })
                     }
                 }
-                Text(
-                    "It goes on this screen below what is already written, and carries on onto new screens if it is long.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
                 Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
                     TextButton(onClick = onDismiss) { Text("Cancel", style = MaterialTheme.typography.titleMedium) }
-                    TextButton(enabled = text.isNotBlank(), onClick = { onInsert(text, size) }) {
+                    TextButton(enabled = text.isNotBlank() && !recordingHere, onClick = { onInsert(text, size) }) {
                         Text("Insert", style = MaterialTheme.typography.titleMedium)
                     }
                 }
