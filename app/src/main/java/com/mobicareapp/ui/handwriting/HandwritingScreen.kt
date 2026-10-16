@@ -142,6 +142,7 @@ import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.mobicareapp.applock.AppLockManager
 import com.mobicareapp.handwriting.HwStroke
@@ -965,42 +966,59 @@ private suspend fun readTextInArea(
     return extraction.paragraphsFor(extraction.detected).joinToString("\n").trim()
 }
 
-/** Type text on the keyboard and choose how big it is; it goes onto the page in the handwriting-style font. */
+/**
+ * Type text on the keyboard and choose how big it is; it goes onto the page in the handwriting-style
+ * font. The window takes the whole screen above the keyboard, with a big text box that grows with
+ * the chosen font size, so a lot can be typed and read comfortably.
+ */
 @Composable
 private fun TypeTextDialog(onInsert: (String, Float) -> Unit, onDismiss: () -> Unit) {
     var text by remember { mutableStateOf("") }
     var size by remember { mutableStateOf(0.075f) }
     val focus = remember { androidx.compose.ui.focus.FocusRequester() }
     LaunchedEffect(Unit) { runCatching { focus.requestFocus() } } // opens the keyboard straight away
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Type text") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(
+            modifier = Modifier.fillMaxSize().padding(8.dp),
+            shape = RoundedCornerShape(20.dp),
+            color = MaterialTheme.colorScheme.surface
+        ) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Type text", style = MaterialTheme.typography.headlineSmall)
+                // The box takes all the room that is left, so a long text can be typed and read.
                 OutlinedTextField(
                     value = text,
                     onValueChange = { text = it },
-                    minLines = 3,
-                    maxLines = 8,
+                    textStyle = androidx.compose.ui.text.TextStyle(
+                        fontSize = when {
+                            size <= 0.05f -> 24.sp
+                            size <= 0.08f -> 32.sp
+                            else -> 42.sp
+                        }
+                    ),
                     label = { Text("Text") },
-                    modifier = Modifier.fillMaxWidth().focusRequester(focus)
+                    modifier = Modifier.weight(1f).fillMaxWidth().focusRequester(focus)
                 )
-                Text("Font size", style = MaterialTheme.typography.labelMedium)
+                Text("Font size on the page", style = MaterialTheme.typography.labelLarge)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf("Normal" to 0.045f, "Big" to 0.075f, "Extra big" to 0.11f).forEach { (label, value) ->
-                        FilterChip(selected = size == value, onClick = { size = value }, label = { Text(label) })
+                        FilterChip(selected = size == value, onClick = { size = value }, label = { Text(label, style = MaterialTheme.typography.titleMedium) })
                     }
                 }
                 Text(
                     "It goes on this screen below what is already written, and carries on onto new screens if it is long.",
-                    style = MaterialTheme.typography.bodySmall,
+                    style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
+                    TextButton(onClick = onDismiss) { Text("Cancel", style = MaterialTheme.typography.titleMedium) }
+                    TextButton(enabled = text.isNotBlank(), onClick = { onInsert(text, size) }) {
+                        Text("Insert", style = MaterialTheme.typography.titleMedium)
+                    }
+                }
             }
-        },
-        confirmButton = { TextButton(enabled = text.isNotBlank(), onClick = { onInsert(text, size) }) { Text("Insert") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
-    )
+        }
+    }
 }
 
 /** Asks for the title a piece of writing is saved under. */
