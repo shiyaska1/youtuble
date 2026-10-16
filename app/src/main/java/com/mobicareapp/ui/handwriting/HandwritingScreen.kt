@@ -1,6 +1,8 @@
 package com.mobicareapp.ui.handwriting
 
 import android.content.ClipData
+import com.mobicareapp.textextract.PdfTextExtractor
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.core.content.FileProvider
 import androidx.core.content.ContextCompat
 import android.net.Uri
@@ -238,6 +240,10 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
     var canvasRatio by remember { mutableStateOf(1.8f) }
     val snippets by viewModel.snippets.collectAsState()
     var uploadMessage by remember { mutableStateOf<String?>(null) }
+    // "Read text from an area": while selecting, a finger drag draws a box instead of writing.
+    var selecting by remember { mutableStateOf(false) }
+    var ocrBusy by remember { mutableStateOf(false) }
+    var ocrText by remember { mutableStateOf<String?>(null) }
     var showVoicePicker by remember { mutableStateOf(false) }
     var showSaveSnippet by remember { mutableStateOf(false) }
     var showInsertSnippet by remember { mutableStateOf(false) }
@@ -400,6 +406,31 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
             }
         )
     }
+    ocrText?.let { text ->
+        var edited by remember(text) { mutableStateOf(text) }
+        AlertDialog(
+            onDismissRequest = { ocrText = null },
+            title = { Text("Text read from the picture") },
+            text = {
+                OutlinedTextField(
+                    value = edited,
+                    onValueChange = { edited = it },
+                    textStyle = MaterialTheme.typography.bodyMedium,
+                    minLines = 5,
+                    maxLines = 12,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Text from picture", edited))
+                    Toast.makeText(context, "Copied to the clipboard", Toast.LENGTH_SHORT).show()
+                    ocrText = null
+                }) { Text("Copy") }
+            },
+            dismissButton = { TextButton(onClick = { ocrText = null }) { Text("Close") } }
+        )
+    }
     if (showVoicePicker) {
         // The same chooser as "Transcribe a recording": voice already in the Library, or any audio file on the phone.
         com.mobicareapp.ui.transcribe.TranscribePickerDialog(
@@ -535,6 +566,17 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
                         onClick = { menuOpen = false; takePhoto() }
                     )
                     DropdownMenuItem(
+                        text = { Text("Read text from a picture (select an area, copy)…") },
+                        onClick = {
+                            menuOpen = false
+                            if (page.imagePath == null) {
+                                Toast.makeText(context, "Put a picture on this screen first (camera, gallery or a PDF page).", Toast.LENGTH_LONG).show()
+                            } else {
+                                selecting = true
+                            }
+                        }
+                    )
+                    DropdownMenuItem(
                         text = { Text("Pick a voice recording and put its text on the blank screen…") },
                         onClick = { menuOpen = false; showVoicePicker = true }
                     )
@@ -584,7 +626,9 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
                 .padding(horizontal = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            val strip = importStatus ?: when (val state = model) {
+            val strip = importStatus
+                ?: (if (selecting) "Drag over the text to read, then lift your finger" else if (ocrBusy) "Reading the text…" else null)
+                ?: when (val state = model) {
                 is ModelState.Checking -> "Preparing handwriting…"
                 is ModelState.Downloading -> "Downloading the English handwriting model (one time)…"
                 is ModelState.Failed -> state.message
@@ -601,7 +645,7 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
             )
             // Always takes its 16dp, spinning or not, so the text beside it never shifts.
             Box(modifier = Modifier.size(16.dp)) {
-                if (busy || fixingPage || importStatus != null || model is ModelState.Checking || model is ModelState.Downloading) {
+                if (busy || fixingPage || ocrBusy || importStatus != null || model is ModelState.Checking || model is ModelState.Downloading) {
                     CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
                 }
             }
@@ -641,6 +685,34 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
             HandwritingCanvas(
                 items = page.items,
                 image = pageImage,
+                selecting = selecting,
+                onSelect = { from, to, canvas ->
+                    selecting = false
+                    val picture = pageImage
+                    val path = page.imagePath
+                    if (picture == null || path == null) {
+                        Toast.makeText(context, "There is no picture on this screen", Toast.LENGTH_SHORT).show()
+                    } else {
+                        scope.launch {
+                            ocrBusy = true
+                            val result = runCatching { readTextInArea(context, path, from, to, canvas, picture.width, picture.height) }
+                            ocrBusy = false
+                            result
+                                .onSuccess { text ->
+                                    if (text.isBlank()) {
+                                        Toast.makeText(context, "No text found in that area", Toast.LENGTH_LONG).show()
+                                    } else {
+                                        // Copied straight away; the box below lets it be corrected and copied again.
+                                        context.getSystemService(ClipboardManager::class.java)
+                                            .setPrimaryClip(ClipData.newPlainText("Text from picture", text))
+                                        Toast.makeText(context, "Text copied to the clipboard", Toast.LENGTH_SHORT).show()
+                                        ocrText = text
+                                    }
+                                }
+                                .onFailure { e -> Toast.makeText(context, e.message ?: "Couldn't read the text", Toast.LENGTH_LONG).show() }
+                        }
+                    }
+                },
                 onStroke = { viewModel.addStroke(it) },
                 onSize = { ratio -> canvasRatio = ratio; viewModel.pageRatio = ratio },
                 modifier = Modifier.fillMaxSize()
@@ -751,6 +823,38 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
             }
         }
     }
+}
+
+/**
+ * Reads the text inside the box dragged over the page. The box is in pad pixels; the picture sits
+ * fitted and centred in the pad, so the box is first mapped back onto the picture's own pixels, then
+ * that part of the picture is cut out and read with the same on-device OCR as "Extract text from PDF"
+ * (English, Hindi and Malayalam).
+ */
+private suspend fun readTextInArea(
+    context: Context,
+    imagePath: String,
+    from: Offset,
+    to: Offset,
+    pad: IntSize,
+    imageWidth: Int,
+    imageHeight: Int
+): String {
+    val scale = minOf(pad.width.toFloat() / imageWidth, pad.height.toFloat() / imageHeight)
+    val offsetX = (pad.width - imageWidth * scale) / 2f
+    val offsetY = (pad.height - imageHeight * scale) / 2f
+    fun x(v: Float) = ((v - offsetX) / scale).coerceIn(0f, imageWidth.toFloat())
+    fun y(v: Float) = ((v - offsetY) / scale).coerceIn(0f, imageHeight.toFloat())
+    val left = minOf(x(from.x), x(to.x))
+    val right = maxOf(x(from.x), x(to.x))
+    val top = minOf(y(from.y), y(to.y))
+    val bottom = maxOf(y(from.y), y(to.y))
+    if (right - left < 12f || bottom - top < 12f) error("Drag a bigger area over the text")
+
+    val bitmap = withContext(Dispatchers.IO) { BitmapFactory.decodeFile(imagePath) } ?: error("Couldn't open the picture")
+    val cropped = PdfTextExtractor.crop(bitmap, left / imageWidth, top / imageHeight, right / imageWidth, bottom / imageHeight)
+    val extraction = PdfTextExtractor.extractText(context, cropped)
+    return extraction.paragraphsFor(extraction.detected).joinToString("\n").trim()
 }
 
 /** Asks for the title a piece of writing is saved under. */
@@ -864,11 +968,16 @@ private fun InsertSnippetDialog(
 private fun HandwritingCanvas(
     items: List<PageItem>,
     image: ImageBitmap?,
+    selecting: Boolean,
+    onSelect: (Offset, Offset, IntSize) -> Unit,
     onStroke: (HwStroke) -> Unit,
     onSize: (Float) -> Unit,
     modifier: Modifier = Modifier
 ) {
     var live by remember { mutableStateOf<List<Offset>>(emptyList()) }
+    // The box being dragged while choosing an area to read (corner to corner).
+    var box by remember { mutableStateOf<Pair<Offset, Offset>?>(null) }
+    val selectingNow by rememberUpdatedState(selecting)
     val textMeasurer = rememberTextMeasurer()
 
     Canvas(
@@ -880,6 +989,23 @@ private fun HandwritingCanvas(
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
                     val width = size.width.toFloat().coerceAtLeast(1f)
+                    if (selectingNow) {
+                        val start = down.position
+                        var end = start
+                        box = start to end
+                        down.consume()
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                            end = Offset(change.position.x.coerceIn(0f, width), change.position.y.coerceIn(0f, size.height.toFloat()))
+                            box = start to end
+                            change.consume()
+                            if (!change.pressed) break
+                        }
+                        box = null
+                        onSelect(start, end, size)
+                        return@awaitEachGesture
+                    }
                     val maxY = size.height.toFloat()
                     val points = mutableListOf(InkPt(down.position.x / width, down.position.y / width, down.uptimeMillis))
                     live = listOf(down.position)
@@ -938,6 +1064,13 @@ private fun HandwritingCanvas(
             }
         }
         drawInk(live, inkWidth)
+
+        box?.let { (a, b) ->
+            val topLeft = Offset(minOf(a.x, b.x), minOf(a.y, b.y))
+            val boxSize = androidx.compose.ui.geometry.Size(kotlin.math.abs(a.x - b.x), kotlin.math.abs(a.y - b.y))
+            drawRect(Color(0x331976D2), topLeft = topLeft, size = boxSize)
+            drawRect(Color(0xFF1976D2), topLeft = topLeft, size = boxSize, style = Stroke(width = 3f))
+        }
     }
 }
 
