@@ -605,6 +605,75 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
         _pages.value.forEachIndexed { i, page -> if (page.items.isNotEmpty() && page.text.isBlank() && !page.textEdited) scheduleRecognition(i, 0) }
     }
 
+    // --- text typed on the keyboard ---------------------------------------------------------------
+
+    /**
+     * Puts text typed on the keyboard onto the notepad in the handwriting-style font, at [size] (page
+     * widths; bigger = a bigger font). On the screen showing, it starts below whatever is already
+     * written (at the top of an empty one); if it doesn't fit, the rest carries on onto new screens
+     * added right after.
+     */
+    fun insertTypedText(text: String, size: Float) {
+        val words = text.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (words.isEmpty()) return
+        val index = _pageIndex.value
+        val page = _pages.value.getOrNull(index) ?: return
+
+        val lineHeight = size * 1.55f
+        val topBaseline = 0.05f + size
+        val lastBaseline = pageRatio.coerceIn(1f, 4f) - 0.06f
+        val startBaseline = if (page.items.isEmpty()) topBaseline else page.lowestY + 0.03f + size
+        val firstCapacity = if (startBaseline > lastBaseline) 0 else ((lastBaseline - startBaseline) / lineHeight).toInt() + 1
+        val perPage = (((lastBaseline - topBaseline) / lineHeight).toInt() + 1).coerceAtLeast(1)
+
+        // Wrap the words into lines across the page (each word remembers its x on the line).
+        val lines = mutableListOf<MutableList<Pair<String, Float>>>(mutableListOf())
+        var x = 0.05f
+        for (word in words) {
+            val width = word.length * size * 0.52f
+            if (x + width > 0.95f && lines.last().isNotEmpty()) {
+                lines.add(mutableListOf())
+                x = 0.05f
+            }
+            lines.last().add(word to x)
+            x += width + size * 0.35f
+        }
+        val nonEmpty = lines.filter { it.isNotEmpty() }
+        val firstLines = nonEmpty.take(firstCapacity)
+        val laterPages = nonEmpty.drop(firstCapacity).chunked(perPage)
+
+        val group = (System.currentTimeMillis() % Int.MAX_VALUE).toInt().coerceAtLeast(1)
+        fun itemsFor(chunk: List<List<Pair<String, Float>>>, baseline: Float): List<PageItem> =
+            chunk.flatMapIndexed { lineIndex, line ->
+                line.map { (word, wordX) -> WordItem(word, wordX, baseline + lineIndex * lineHeight, size, emptyList(), 0f, group) }
+            }
+        fun textFor(chunk: List<List<Pair<String, Float>>>): String = chunk.joinToString(" ") { line -> line.joinToString(" ") { it.first } }
+
+        _pages.update { pages ->
+            val result = pages.toMutableList()
+            if (firstLines.isNotEmpty()) {
+                val current = result[index]
+                result[index] = current.copy(
+                    items = current.items + itemsFor(firstLines, startBaseline),
+                    redo = emptyList(),
+                    text = HandwritingRecognizer.joinPieces(listOf(current.text.trim(), textFor(firstLines)).filter { it.isNotEmpty() }, context)
+                )
+            }
+            laterPages.forEachIndexed { i, chunk ->
+                result.add(index + 1 + i, HwPage(items = itemsFor(chunk, topBaseline), text = textFor(chunk)))
+            }
+            result
+        }
+        // If nothing fitted below the writing on this screen, show the first new screen instead.
+        if (firstLines.isEmpty() && laterPages.isNotEmpty()) _pageIndex.value = index + 1
+        persist()
+        clearSuggestions()
+        // New screens shifted the ones after them, so any reading that was waiting is redone for the right screen.
+        recognizeJobs.values.forEach { it.cancel() }
+        recognizeJobs.clear()
+        _pages.value.forEachIndexed { i, pg -> if (pg.items.isNotEmpty() && pg.text.isBlank() && !pg.textEdited) scheduleRecognition(i, 0) }
+    }
+
     // --- PDF: one page per screen ----------------------------------------------------------------
 
     private val _importStatus = MutableStateFlow<String?>(null)

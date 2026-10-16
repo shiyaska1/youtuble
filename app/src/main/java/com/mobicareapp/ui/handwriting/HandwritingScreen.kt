@@ -1,6 +1,9 @@
 package com.mobicareapp.ui.handwriting
 
 import android.content.ClipData
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.material3.FilterChip
+import androidx.compose.material.icons.filled.Keyboard
 import com.mobicareapp.textextract.PdfTextExtractor
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.core.content.FileProvider
@@ -256,6 +259,7 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
     var selecting by remember { mutableStateOf(false) }
     var ocrBusy by remember { mutableStateOf(false) }
     var ocrText by remember { mutableStateOf<String?>(null) }
+    var showTypeText by remember { mutableStateOf(false) }
     var showVoicePicker by remember { mutableStateOf(false) }
     var showSaveSnippet by remember { mutableStateOf(false) }
     var showInsertSnippet by remember { mutableStateOf(false) }
@@ -443,6 +447,12 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
             dismissButton = { TextButton(onClick = { ocrText = null }) { Text("Close") } }
         )
     }
+    if (showTypeText) {
+        TypeTextDialog(
+            onInsert = { text, size -> showTypeText = false; viewModel.insertTypedText(text, size) },
+            onDismiss = { showTypeText = false }
+        )
+    }
     if (showVoicePicker) {
         // The same chooser as "Transcribe a recording": voice already in the Library, or any audio file on the phone.
         com.mobicareapp.ui.transcribe.TranscribePickerDialog(
@@ -517,23 +527,26 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
             modifier = Modifier.fillMaxWidth().height(44.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            IconButton(onClick = onBack, modifier = Modifier.size(44.dp)) { Icon(Icons.Default.ArrowBack, contentDescription = "Back") }
+            IconButton(onClick = onBack, modifier = Modifier.size(40.dp)) { Icon(Icons.Default.ArrowBack, contentDescription = "Back") }
             Text("${index + 1} / ${pages.size}", style = MaterialTheme.typography.titleSmall, maxLines = 1)
             Spacer(Modifier.weight(1f))
-            IconButton(onClick = { viewModel.undo() }, enabled = page.items.isNotEmpty(), modifier = Modifier.size(44.dp)) {
+            IconButton(onClick = { viewModel.undo() }, enabled = page.items.isNotEmpty(), modifier = Modifier.size(40.dp)) {
                 Icon(Icons.Default.Undo, contentDescription = "Undo")
             }
-            IconButton(onClick = { viewModel.redo() }, enabled = page.redo.isNotEmpty(), modifier = Modifier.size(44.dp)) {
+            IconButton(onClick = { viewModel.redo() }, enabled = page.redo.isNotEmpty(), modifier = Modifier.size(40.dp)) {
                 Icon(Icons.Default.Redo, contentDescription = "Redo")
             }
-            IconButton(onClick = { takePhoto() }, modifier = Modifier.size(44.dp)) {
+            IconButton(onClick = { showTypeText = true }, modifier = Modifier.size(40.dp)) {
+                Icon(Icons.Default.Keyboard, contentDescription = "Type text with the keyboard")
+            }
+            IconButton(onClick = { takePhoto() }, modifier = Modifier.size(40.dp)) {
                 Icon(Icons.Default.PhotoCamera, contentDescription = "Take a photo")
             }
-            IconButton(onClick = { previewText = viewModel.combinedText(); onOverlay(HwOverlay.Preview) }, modifier = Modifier.size(44.dp)) {
+            IconButton(onClick = { previewText = viewModel.combinedText(); onOverlay(HwOverlay.Preview) }, modifier = Modifier.size(40.dp)) {
                 Icon(Icons.Default.Fullscreen, contentDescription = "Full preview of all pages")
             }
             Box {
-                IconButton(onClick = { menuOpen = true }, modifier = Modifier.size(44.dp)) { Icon(Icons.Default.MoreVert, contentDescription = "More") }
+                IconButton(onClick = { menuOpen = true }, modifier = Modifier.size(40.dp)) { Icon(Icons.Default.MoreVert, contentDescription = "More") }
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                     DropdownMenuItem(
                         text = { Text(if (autoFix) "Auto-fix spelling & grammar: ON" else "Auto-fix spelling & grammar: OFF") },
@@ -576,6 +589,10 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
                     DropdownMenuItem(
                         text = { Text("Take a photo with the camera (fits this page)…") },
                         onClick = { menuOpen = false; takePhoto() }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Type text with the keyboard (big font)…") },
+                        onClick = { menuOpen = false; showTypeText = true }
                     )
                     DropdownMenuItem(
                         text = { Text("Read text from a picture (select an area, copy)…") },
@@ -874,6 +891,44 @@ private suspend fun readTextInArea(
     val cropped = PdfTextExtractor.crop(bitmap, left / imageWidth, top / imageHeight, right / imageWidth, bottom / imageHeight)
     val extraction = PdfTextExtractor.extractText(context, cropped)
     return extraction.paragraphsFor(extraction.detected).joinToString("\n").trim()
+}
+
+/** Type text on the keyboard and choose how big it is; it goes onto the page in the handwriting-style font. */
+@Composable
+private fun TypeTextDialog(onInsert: (String, Float) -> Unit, onDismiss: () -> Unit) {
+    var text by remember { mutableStateOf("") }
+    var size by remember { mutableStateOf(0.075f) }
+    val focus = remember { androidx.compose.ui.focus.FocusRequester() }
+    LaunchedEffect(Unit) { runCatching { focus.requestFocus() } } // opens the keyboard straight away
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Type text") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    minLines = 3,
+                    maxLines = 8,
+                    label = { Text("Text") },
+                    modifier = Modifier.fillMaxWidth().focusRequester(focus)
+                )
+                Text("Font size", style = MaterialTheme.typography.labelMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("Normal" to 0.045f, "Big" to 0.075f, "Extra big" to 0.11f).forEach { (label, value) ->
+                        FilterChip(selected = size == value, onClick = { size = value }, label = { Text(label) })
+                    }
+                }
+                Text(
+                    "It goes on this screen below what is already written, and carries on onto new screens if it is long.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
+        confirmButton = { TextButton(enabled = text.isNotBlank(), onClick = { onInsert(text, size) }) { Text("Insert") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+    )
 }
 
 /** Asks for the title a piece of writing is saved under. */
