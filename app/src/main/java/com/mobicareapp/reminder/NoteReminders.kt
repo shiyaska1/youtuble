@@ -75,6 +75,20 @@ object NoteReminders {
     internal const val EXTRA_NOTE_ID = "noteId"
     internal const val EXTRA_INDEX = "index"
 
+    // --- checking that it will work --------------------------------------------------------------
+
+    /** False when notifications are switched off for the app (then no reminder can show, however well it is scheduled). */
+    fun notificationsAllowed(context: Context): Boolean =
+        androidx.core.app.NotificationManagerCompat.from(context).areNotificationsEnabled()
+
+    /** Shows a reminder-style notification right now, so the user can see that notifications work. */
+    fun sendTest(context: Context, noteId: Long, title: String) {
+        showNotification(context, noteId, title, "This is a test of the reminder notification.", 0)
+    }
+
+    /** The time of the first notification of the reminder's next round (for showing "next reminder at…"). */
+    fun nextTime(reminder: NoteReminder): Long = nextTrigger(reminder)
+
     // --- setting reminders -------------------------------------------------------------------
 
     /** Saves [reminder] and schedules its next round, replacing whatever that note had before. */

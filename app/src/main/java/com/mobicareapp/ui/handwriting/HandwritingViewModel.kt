@@ -484,6 +484,88 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
         _pages.value.forEachIndexed { i, page -> if (page.items.isNotEmpty() && !page.textEdited) scheduleRecognition(i, 0) }
     }
 
+    // --- voice -> text on the latest blank screen ------------------------------------------------
+
+    /**
+     * Transcribes a voice recording (with the engine chosen in the Transcribe window, in English) and
+     * puts the text on the latest blank screen of the notepad.
+     */
+    fun transcribeAndInsert(file: File) {
+        if (_importStatus.value != null) return
+        viewModelScope.launch {
+            _importStatus.value = "Transcribing the voice…"
+            val result = com.mobicareapp.transcribe.TranscriptionRouter.transcribe(context, file, "en") { status ->
+                _importStatus.value = status
+            }
+            _importStatus.value = null
+            result
+                .onSuccess { text ->
+                    if (text.isBlank()) _readError.value = "No speech was recognized in that recording"
+                    else insertTextOnBlankPage(text.trim())
+                }
+                .onFailure { e -> _readError.value = e.message ?: "Couldn't transcribe that recording" }
+        }
+    }
+
+    /**
+     * Lays [text] out on the page as words in the handwriting-style font, wrapped across the page.
+     * It goes on the latest screen that is blank (or a new one added at the end if none is); text too
+     * long for one screen carries on onto new screens right after it. The notepad then shows that screen.
+     */
+    private fun insertTextOnBlankPage(text: String) {
+        val size = TEXT_SIZE
+        val lineHeight = size * 1.55f
+        val firstBaseline = 0.05f + size
+        val lastBaseline = pageRatio.coerceIn(1f, 4f) - 0.06f
+        val linesPerPage = (((lastBaseline - firstBaseline) / lineHeight).toInt() + 1).coerceAtLeast(1)
+
+        // Wrap the words into lines (each word remembers its x on the line).
+        val lines = mutableListOf<MutableList<Pair<String, Float>>>(mutableListOf())
+        var x = 0.05f
+        for (word in text.split(Regex("\\s+")).filter { it.isNotEmpty() }) {
+            val width = word.length * size * 0.52f
+            if (x + width > 0.95f && lines.last().isNotEmpty()) {
+                lines.add(mutableListOf())
+                x = 0.05f
+            }
+            lines.last().add(word to x)
+            x += width + size * 0.35f
+        }
+        val chunks = lines.filter { it.isNotEmpty() }.chunked(linesPerPage)
+        if (chunks.isEmpty()) return
+
+        val group = (System.currentTimeMillis() % Int.MAX_VALUE).toInt().coerceAtLeast(1)
+        fun itemsFor(chunk: List<List<Pair<String, Float>>>): List<PageItem> =
+            chunk.flatMapIndexed { lineIndex, line ->
+                line.map { (word, wordX) -> WordItem(word, wordX, firstBaseline + lineIndex * lineHeight, size, emptyList(), 0f, group) }
+            }
+        fun textFor(chunk: List<List<Pair<String, Float>>>): String = chunk.joinToString(" ") { line -> line.joinToString(" ") { it.first } }
+
+        var targetIndex = 0
+        _pages.update { pages ->
+            val result = pages.toMutableList()
+            // The latest blank screen; if every screen has something on it, a new one at the end.
+            var target = result.indexOfLast { it.items.isEmpty() && it.imagePath == null }
+            if (target < 0) {
+                result += HwPage()
+                target = result.lastIndex
+            }
+            targetIndex = target
+            result[target] = result[target].copy(items = itemsFor(chunks[0]), redo = emptyList(), text = textFor(chunks[0]), textEdited = false)
+            chunks.drop(1).forEachIndexed { i, chunk ->
+                result.add(target + 1 + i, HwPage(items = itemsFor(chunk), text = textFor(chunk)))
+            }
+            result
+        }
+        _pageIndex.value = targetIndex
+        persist()
+        clearSuggestions()
+        // Pages may have shifted, so any reading that was waiting is redone for the right page.
+        recognizeJobs.values.forEach { it.cancel() }
+        recognizeJobs.clear()
+        _pages.value.forEachIndexed { i, page -> if (page.items.isNotEmpty() && page.text.isBlank() && !page.textEdited) scheduleRecognition(i, 0) }
+    }
+
     // --- PDF: one page per screen ----------------------------------------------------------------
 
     private val _importStatus = MutableStateFlow<String?>(null)
@@ -678,6 +760,9 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
 
         /** Shorter wait before suggestions appear, so they're there while the writer is still deciding about the word. */
         const val SUGGEST_DELAY_MS = 450L
+
+        /** Font size (in page widths) of text put on a page from a voice transcript. */
+        const val TEXT_SIZE = 0.045f
 
         /** A PDF longer than this only has its first pages added (each becomes a picture file). */
         const val MAX_PDF_PAGES = 60

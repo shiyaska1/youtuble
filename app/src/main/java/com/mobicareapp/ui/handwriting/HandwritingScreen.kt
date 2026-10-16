@@ -238,6 +238,7 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
     var canvasRatio by remember { mutableStateOf(1.8f) }
     val snippets by viewModel.snippets.collectAsState()
     var uploadMessage by remember { mutableStateOf<String?>(null) }
+    var showVoicePicker by remember { mutableStateOf(false) }
     var showSaveSnippet by remember { mutableStateOf(false) }
     var showInsertSnippet by remember { mutableStateOf(false) }
 
@@ -399,6 +400,13 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
             }
         )
     }
+    if (showVoicePicker) {
+        // The same chooser as "Transcribe a recording": voice already in the Library, or any audio file on the phone.
+        com.mobicareapp.ui.transcribe.TranscribePickerDialog(
+            onDismiss = { showVoicePicker = false },
+            onPick = { file -> showVoicePicker = false; viewModel.transcribeAndInsert(file) }
+        )
+    }
     if (showSaveSnippet) {
         SaveSnippetDialog(
             onSave = { title ->
@@ -525,6 +533,10 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
                     DropdownMenuItem(
                         text = { Text("Take a photo with the camera (fits this page)…") },
                         onClick = { menuOpen = false; takePhoto() }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Pick a voice recording and put its text on the blank screen…") },
+                        onClick = { menuOpen = false; showVoicePicker = true }
                     )
                     DropdownMenuItem(
                         text = { Text("Insert a PDF (each page on its own screen)…") },

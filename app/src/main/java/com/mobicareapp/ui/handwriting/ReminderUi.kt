@@ -134,6 +134,22 @@ fun ReminderDialog(noteId: Long, noteTitle: String, onDismiss: () -> Unit, onCha
                         }
                     }) { Text("Allow exact alarms") }
                 }
+                TextButton(onClick = {
+                    if (NoteReminders.notificationsAllowed(context)) {
+                        NoteReminders.sendTest(context, noteId, noteTitle)
+                        Toast.makeText(context, "A test notification was sent. Pull down the notification bar.", Toast.LENGTH_LONG).show()
+                    } else {
+                        Toast.makeText(context, "Notifications are switched off for this app.", Toast.LENGTH_LONG).show()
+                        AppLockManager.suppressNextLock()
+                        runCatching {
+                            context.startActivity(
+                                Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                                    .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            )
+                        }
+                    }
+                }) { Text("Send a test notification now") }
                 if (existing != null) {
                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         TextButton(onClick = {
@@ -165,7 +181,28 @@ fun ReminderDialog(noteId: Long, noteTitle: String, onDismiss: () -> Unit, onCha
                     NoteReminder(noteId, daily = false, onceAt = at, hour = hour, minute = minute)
                 }
                 NoteReminders.set(context, reminder)
-                Toast.makeText(context, "Reminder set: " + describeReminder(context, reminder), Toast.LENGTH_LONG).show()
+                val next = JavaDateFormat.getDateTimeInstance(JavaDateFormat.MEDIUM, JavaDateFormat.SHORT).format(Date(NoteReminders.nextTime(reminder)))
+                Toast.makeText(context, "Reminder set. Next notification: $next", Toast.LENGTH_LONG).show()
+                if (!NoteReminders.notificationsAllowed(context)) {
+                    Toast.makeText(context, "Notifications are switched off for this app. Turn them on or the reminder can't show.", Toast.LENGTH_LONG).show()
+                    AppLockManager.suppressNextLock()
+                    runCatching {
+                        context.startActivity(
+                            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                                .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
+                    }
+                } else if (!NoteReminders.canScheduleExactAlarms(context) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    // Without this permission the system may hold the reminder back by many minutes.
+                    AppLockManager.suppressNextLock()
+                    runCatching {
+                        context.startActivity(
+                            Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM, Uri.parse("package:${context.packageName}"))
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
+                    }
+                }
                 onChanged()
                 onDismiss()
             }) { Text("Save") }
