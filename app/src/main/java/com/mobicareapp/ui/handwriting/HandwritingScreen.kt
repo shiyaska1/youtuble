@@ -20,6 +20,7 @@ import java.text.SimpleDateFormat
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Dispatchers
 import com.mobicareapp.handwriting.HandwritingStore
+import com.mobicareapp.handwriting.SharedContentInbox
 import com.mobicareapp.handwriting.HwSnippet
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.IntOffset
@@ -230,7 +231,16 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
 
     // When the notepad opens with earlier writing in it, ask once: carry on with it, or start a clean
     // single page for a quick note. Decided at the moment of opening, so it never pops up mid-writing.
-    val askAtStart = remember { pages.any { it.items.isNotEmpty() || it.imagePath != null } || pages.size > 1 }
+    // (Not when something was just shared to the app: that goes onto the first free screen, and a
+    // "New notepad" answer would wipe it.)
+    val askAtStart = remember {
+        !SharedContentInbox.hasPending() && (pages.any { it.items.isNotEmpty() || it.imagePath != null } || pages.size > 1)
+    }
+    val sharedVersion by SharedContentInbox.version.collectAsState()
+    LaunchedEffect(sharedVersion) {
+        val shared = SharedContentInbox.drain()
+        if (shared.isNotEmpty()) viewModel.handleShared(shared)
+    }
     var startChoiceDone by remember { mutableStateOf(false) }
     var openAtStartup by remember { mutableStateOf(HandwritingStore.isOpenAtStartup(context)) }
     var previewText by remember { mutableStateOf("") }

@@ -91,7 +91,7 @@ object GroqTranscriber {
     private fun mimeTypeFor(file: File): String = when (file.extension.lowercase()) {
         "wav" -> "audio/wav"
         "mp3" -> "audio/mpeg"
-        "ogg", "oga" -> "audio/ogg"
+        "ogg", "oga", "opus" -> "audio/ogg"
         "flac" -> "audio/flac"
         "webm" -> "audio/webm"
         else -> "audio/mp4"

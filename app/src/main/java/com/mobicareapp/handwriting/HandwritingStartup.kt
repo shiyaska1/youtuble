@@ -1,16 +1,25 @@
 package com.mobicareapp.handwriting
 
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * A one-time request, made when the app is launched, to open the handwriting notepad straight away.
- * MainActivity raises it; the Scan tab (which hosts the notepad) takes it exactly once, so rotating
- * the phone or coming back to the tab later doesn't reopen the notepad.
+ * A request to open the handwriting notepad straight away: made when the app is launched, and when
+ * something is shared to the app. MainActivity raises it; the Scan tab (which hosts the notepad)
+ * takes it exactly once, so rotating the phone or coming back to the tab later doesn't reopen it.
  */
 object HandwritingStartup {
     private val requested = AtomicBoolean(false)
+    private val _count = MutableStateFlow(0)
+    /** Changes with every request, so screens that are already showing notice a new one. */
+    val requestCount: StateFlow<Int> = _count.asStateFlow()
 
-    fun request() = requested.set(true)
+    fun request() {
+        requested.set(true)
+        _count.value = _count.value + 1
+    }
 
     fun isRequested(): Boolean = requested.get()
 

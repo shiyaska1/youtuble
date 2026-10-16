@@ -130,7 +130,8 @@ fun ScanScreen() {
     var showUploadLink by remember { mutableStateOf(false) }
     var showHandwriting by remember { mutableStateOf(false) }
     // Launched from a fresh app start: open the handwriting notepad straight away (once).
-    LaunchedEffect(Unit) { if (HandwritingStartup.consume()) showHandwriting = true }
+    val handwritingRequests by HandwritingStartup.requestCount.collectAsState()
+    LaunchedEffect(handwritingRequests) { if (HandwritingStartup.consume()) showHandwriting = true }
 
     // Rendered unconditionally (rather than inside one of the branches below) so it stays on top
     // as an overlay no matter which screen — the document list or a single document's pages — is

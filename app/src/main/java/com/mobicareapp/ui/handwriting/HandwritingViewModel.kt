@@ -20,6 +20,7 @@ import com.mobicareapp.handwriting.ItemTransform
 import com.mobicareapp.handwriting.InkItem
 import com.mobicareapp.handwriting.InkLayout
 import com.mobicareapp.handwriting.PageItem
+import com.mobicareapp.handwriting.SharedItem
 import com.mobicareapp.handwriting.WordItem
 import com.mobicareapp.handwriting.WordSuggester
 import com.mobicareapp.textextract.PdfTextExtractor
@@ -464,20 +465,35 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
     fun insertImages(uris: List<Uri>, deleteSourceFiles: Boolean = false) {
         if (uris.isEmpty()) return
         val startIndex = _pageIndex.value
-        viewModelScope.launch {
-            val paths = withContext(Dispatchers.IO) {
-                uris.mapNotNull { uri -> runCatching { copyDownscaled(uri) }.getOrNull() }.also {
-                    // A photo just taken with the camera is a full-size temporary file; once the page has its own copy it can go.
-                    if (deleteSourceFiles) uris.forEach { uri -> if (uri.scheme == "file") runCatching { File(uri.path!!).delete() } }
-                }
+        viewModelScope.launch { insertImagesNow(uris, deleteSourceFiles, startIndex) }
+    }
+
+    /** [startIndex] null = the first blank screen (a new one if none is), used for shared pictures. */
+    private suspend fun insertImagesNow(uris: List<Uri>, deleteSourceFiles: Boolean, startIndex: Int?) {
+        val paths = withContext(Dispatchers.IO) {
+            uris.mapNotNull { uri -> runCatching { copyDownscaled(uri) }.getOrNull() }.also {
+                // A photo just taken with the camera (or a copy of a shared picture) is a temporary file; once the page has its own copy it can go.
+                if (deleteSourceFiles) uris.forEach { uri -> if (uri.scheme == "file") runCatching { File(uri.path!!).delete() } }
             }
-            if (paths.isEmpty()) {
-                _readError.value = "Couldn't open that picture"
-                return@launch
-            }
-            placeImagePaths(paths, startIndex)
-            if (paths.size < uris.size) _readError.value = "${uris.size - paths.size} picture(s) couldn't be opened"
         }
+        if (paths.isEmpty()) {
+            _readError.value = "Couldn't open that picture"
+            return
+        }
+        val target = startIndex ?: firstBlankIndex()
+        placeImagePaths(paths, target)
+        if (startIndex == null) _pageIndex.value = target
+        if (paths.size < uris.size) _readError.value = "${uris.size - paths.size} picture(s) couldn't be opened"
+    }
+
+    /** The first screen with nothing on it; a new one is added at the end if every screen is used. */
+    private fun firstBlankIndex(): Int {
+        var index = _pages.value.indexOfFirst { it.items.isEmpty() && it.imagePath == null }
+        if (index < 0) {
+            _pages.update { it + HwPage() }
+            index = _pages.value.lastIndex
+        }
+        return index
     }
 
     /**
@@ -508,19 +524,22 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
      */
     fun transcribeAndInsert(file: File) {
         if (_importStatus.value != null) return
-        viewModelScope.launch {
-            _importStatus.value = "Transcribing the voice…"
-            val result = com.mobicareapp.transcribe.TranscriptionRouter.transcribe(context, file, "en") { status ->
-                _importStatus.value = status
-            }
-            _importStatus.value = null
-            result
-                .onSuccess { text ->
-                    if (text.isBlank()) _readError.value = "No speech was recognized in that recording"
-                    else insertTextOnBlankPage(text.trim())
-                }
-                .onFailure { e -> _readError.value = e.message ?: "Couldn't transcribe that recording" }
+        viewModelScope.launch { transcribeNow(file, firstBlank = false) }
+    }
+
+    /** [firstBlank] false = the latest blank screen (picked voice), true = the first blank screen (shared voice). */
+    private suspend fun transcribeNow(file: File, firstBlank: Boolean) {
+        _importStatus.value = "Transcribing the voice…"
+        val result = com.mobicareapp.transcribe.TranscriptionRouter.transcribe(context, file, "en") { status ->
+            _importStatus.value = status
         }
+        _importStatus.value = null
+        result
+            .onSuccess { text ->
+                if (text.isBlank()) _readError.value = "No speech was recognized in that recording"
+                else insertTextOnBlankPage(text.trim(), firstBlank)
+            }
+            .onFailure { e -> _readError.value = e.message ?: "Couldn't transcribe that recording" }
     }
 
     /**
@@ -528,7 +547,7 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
      * It goes on the latest screen that is blank (or a new one added at the end if none is); text too
      * long for one screen carries on onto new screens right after it. The notepad then shows that screen.
      */
-    private fun insertTextOnBlankPage(text: String) {
+    private fun insertTextOnBlankPage(text: String, useFirstBlank: Boolean = false) {
         val size = TEXT_SIZE
         val lineHeight = size * 1.55f
         val firstBaseline = 0.05f + size
@@ -561,7 +580,11 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
         _pages.update { pages ->
             val result = pages.toMutableList()
             // The latest blank screen; if every screen has something on it, a new one at the end.
-            var target = result.indexOfLast { it.items.isEmpty() && it.imagePath == null }
+            var target = if (useFirstBlank) {
+                result.indexOfFirst { it.items.isEmpty() && it.imagePath == null }
+            } else {
+                result.indexOfLast { it.items.isEmpty() && it.imagePath == null }
+            }
             if (target < 0) {
                 result += HwPage()
                 target = result.lastIndex
@@ -596,20 +619,53 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
     fun insertPdf(uri: Uri) {
         if (_importStatus.value != null) return
         val startIndex = _pageIndex.value
-        viewModelScope.launch {
-            _importStatus.value = "Reading the PDF…"
-            val result = withContext(Dispatchers.IO) { runCatching { renderPdfPages(uri) } }
-            _importStatus.value = null
-            result
-                .onSuccess { (paths, pageCount) ->
-                    if (paths.isEmpty()) {
-                        _readError.value = "That PDF has no pages"
-                        return@onSuccess
-                    }
-                    placeImagePaths(paths, startIndex)
-                    if (pageCount > paths.size) _readError.value = "Only the first ${paths.size} of $pageCount PDF pages were added"
+        viewModelScope.launch { insertPdfNow(uri, startIndex) }
+    }
+
+    /** [startIndex] null = the first blank screen, used for a shared PDF. */
+    private suspend fun insertPdfNow(uri: Uri, startIndex: Int?) {
+        _importStatus.value = "Reading the PDF…"
+        val result = withContext(Dispatchers.IO) { runCatching { renderPdfPages(uri) } }
+        _importStatus.value = null
+        result
+            .onSuccess { (paths, pageCount) ->
+                if (paths.isEmpty()) {
+                    _readError.value = "That PDF has no pages"
+                    return@onSuccess
                 }
-                .onFailure { _readError.value = "Couldn't read that PDF" }
+                val target = startIndex ?: firstBlankIndex()
+                placeImagePaths(paths, target)
+                if (startIndex == null) _pageIndex.value = target
+                if (pageCount > paths.size) _readError.value = "Only the first ${paths.size} of $pageCount PDF pages were added"
+            }
+            .onFailure { _readError.value = "Couldn't read that PDF" }
+    }
+
+    // --- content shared from other apps -------------------------------------------------------------
+
+    /**
+     * Handles what another app shared (WhatsApp voice notes and pictures, a PDF…), one after the
+     * other: a voice is transcribed and its text put on the first free screen; a picture goes on the
+     * first free screen; a PDF's pages go on free screens from the first one on.
+     */
+    fun handleShared(items: List<SharedItem>) {
+        if (items.isEmpty()) return
+        viewModelScope.launch {
+            for (item in items) {
+                val mime = item.mime.lowercase()
+                when {
+                    mime.startsWith("audio/") || mime == "application/ogg" -> {
+                        transcribeNow(item.file, firstBlank = true)
+                        item.file.delete()
+                    }
+                    mime.startsWith("image/") -> insertImagesNow(listOf(Uri.fromFile(item.file)), deleteSourceFiles = true, startIndex = null)
+                    mime == "application/pdf" -> {
+                        insertPdfNow(Uri.fromFile(item.file), startIndex = null)
+                        item.file.delete()
+                    }
+                    else -> item.file.delete()
+                }
+            }
         }
     }
 

@@ -111,7 +111,7 @@ object GeminiTranscriber {
     private fun mimeTypeFor(file: File): String = when (file.extension.lowercase()) {
         "wav" -> "audio/wav"
         "mp3" -> "audio/mp3"
-        "ogg", "oga" -> "audio/ogg"
+        "ogg", "oga", "opus" -> "audio/ogg"
         "flac" -> "audio/flac"
         "aac" -> "audio/aac"
         else -> "audio/mp4"

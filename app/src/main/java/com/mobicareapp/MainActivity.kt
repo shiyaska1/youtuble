@@ -53,6 +53,13 @@ import com.mobicareapp.applock.canUseAppLock
 import com.mobicareapp.data.SavedMedia
 import com.mobicareapp.handwriting.HandwritingStartup
 import com.mobicareapp.handwriting.HandwritingStore
+import com.mobicareapp.handwriting.SharedContentInbox
+import com.mobicareapp.handwriting.SharedItem
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 import com.mobicareapp.ui.home.HomeScreen
 import com.mobicareapp.ui.library.LibraryScreen
 import com.mobicareapp.ui.player.PipState
@@ -86,8 +93,10 @@ class MainActivity : FragmentActivity() {
         }
         AppLockManager.registerLifecycleObserver()
         handleQuickActionIntent(intent)
+        handleShareIntent(intent)
         // A fresh launch (not a rotation/recreation, and not a record shortcut) opens the handwriting notepad for quick notes.
         if (savedInstanceState == null && intent?.getStringExtra(EXTRA_QUICK_ACTION) == null &&
+            intent?.action != Intent.ACTION_SEND && intent?.action != Intent.ACTION_SEND_MULTIPLE &&
             HandwritingStore.isOpenAtStartup(this)
         ) {
             HandwritingStartup.request()
@@ -105,7 +114,52 @@ class MainActivity : FragmentActivity() {
         // new Activity instance (onCreate runs again) rather than calling this — handled here too
         // anyway, in case that ever changes.
         handleQuickActionIntent(intent)
+        handleShareIntent(intent)
     }
+
+    /**
+     * Something was shared to this app from another one (WhatsApp voice notes and pictures, a PDF):
+     * keep a copy right away (the sender's permission to read it only lasts a short while), queue it for
+     * the handwriting notepad, and open the notepad, which transcribes voices and puts pictures on free screens.
+     */
+    private fun handleShareIntent(intent: Intent?) {
+        val shared: List<Uri> = when (intent?.action) {
+            Intent.ACTION_SEND -> listOfNotNull(
+                if (Build.VERSION.SDK_INT >= 33) intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                else @Suppress("DEPRECATION") intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+            )
+            Intent.ACTION_SEND_MULTIPLE ->
+                (if (Build.VERSION.SDK_INT >= 33) intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                else @Suppress("DEPRECATION") intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)).orEmpty()
+            else -> return
+        }
+        if (shared.isEmpty()) return
+        val declaredType = intent?.type
+        // Handled once: a recreated activity must not queue the same share again.
+        intent?.action = null
+        lifecycleScope.launch {
+            val items = withContext(Dispatchers.IO) { shared.mapNotNull { copySharedFile(it, declaredType) } }
+            if (items.isNotEmpty()) {
+                SharedContentInbox.add(items)
+                HandwritingStartup.request()
+            }
+        }
+    }
+
+    private fun copySharedFile(uri: Uri, declaredType: String?): SharedItem? = runCatching {
+        val mime = contentResolver.getType(uri) ?: declaredType?.takeIf { !it.endsWith("/*") } ?: "application/octet-stream"
+        var name = "shared"
+        contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) name = cursor.getString(0) ?: name
+        }
+        // WhatsApp voice notes are Ogg Opus files named .opus; the transcription services know that container as .ogg.
+        var extension = name.substringAfterLast('.', "").lowercase().ifEmpty { mime.substringAfter('/').substringBefore(';') }
+        if (extension == "opus" || extension == "oga") extension = "ogg"
+        val dir = File(cacheDir, "shared_inbox").apply { mkdirs() }
+        val file = File(dir, "shared_${System.nanoTime()}.$extension")
+        contentResolver.openInputStream(uri)?.use { input -> file.outputStream().use { input.copyTo(it) } } ?: return@runCatching null
+        SharedItem(file, mime)
+    }.getOrNull()
 
     private fun handleQuickActionIntent(intent: Intent?) {
         when (intent?.getStringExtra(EXTRA_QUICK_ACTION)) {
@@ -193,8 +247,13 @@ private fun AppRoot(activity: FragmentActivity) {
         if (pendingQuickAction != null) selectedTab = 3
     }
     // Handwriting notepad as the start-up screen: it lives in the Scan tab, which opens it as soon as it appears.
-    LaunchedEffect(Unit) {
-        if (HandwritingStartup.isRequested() && PendingQuickRecordAction.pending.value == null) selectedTab = 2
+    val handwritingRequests by HandwritingStartup.requestCount.collectAsState()
+    LaunchedEffect(handwritingRequests) {
+        if (HandwritingStartup.isRequested() && PendingQuickRecordAction.pending.value == null) {
+            // Back to the main screen first, in case the player or browser is on top (e.g. a share arrives while one is open).
+            navController.popBackStack("main", false)
+            selectedTab = 2
+        }
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
