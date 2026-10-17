@@ -3,6 +3,8 @@ package com.mobicareapp.ui.clipboard
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.net.Uri
+import androidx.compose.runtime.DisposableEffect
+import com.mobicareapp.applock.AppLockManager
 import android.provider.OpenableColumns
 import android.webkit.MimeTypeMap
 import androidx.compose.material.icons.filled.Description
@@ -74,6 +76,12 @@ import kotlinx.coroutines.launch
 fun ImageClipboardDialog(onDismiss: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    // Choosing a file leaves the app for a moment (and an upload can take a while): without this
+    // the app-lock would cover the screen and the picked file would never be uploaded.
+    DisposableEffect(Unit) {
+        AppLockManager.acquireLockHold()
+        onDispose { AppLockManager.releaseLockHold() }
+    }
     var attachments by remember { mutableStateOf<List<Uri>>(emptyList()) }
     var copied by remember { mutableStateOf(false) }
 
