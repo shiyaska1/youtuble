@@ -3,6 +3,9 @@ package com.mobicareapp.ui.clipboard
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.net.Uri
+import android.provider.OpenableColumns
+import android.webkit.MimeTypeMap
+import androidx.compose.material.icons.filled.Description
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -17,6 +20,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.Row
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -79,6 +84,13 @@ fun ImageClipboardDialog(onDismiss: () -> Unit) {
     var uploadStatus by remember { mutableStateOf<String?>(null) }
     var noteText by remember { mutableStateOf("") }
 
+    // Any other kind of file: documents, zip, rar... Uploaded as "1" plus the file's own ending (1.zip).
+    var files by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        files = files + uris.filter { it !in files }
+        uploadStatus = null
+    }
+
     val mediaPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.PickMultipleVisualMedia()
     ) { uris ->
@@ -115,6 +127,29 @@ fun ImageClipboardDialog(onDismiss: () -> Unit) {
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(if (attachments.isEmpty()) "Choose photos/videos" else "Add more")
+                }
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = { filePicker.launch(arrayOf("*/*")) },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Default.Description, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(if (files.isEmpty()) "Choose documents / zip / any file" else "Add more files")
+                }
+                files.forEach { uri ->
+                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            displayNameOf(context, uri) + "  →  " + serverNameFor(context, uri),
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        IconButton(onClick = { files = files - uri }, modifier = Modifier.size(28.dp)) {
+                            Icon(Icons.Default.Close, contentDescription = "Remove", modifier = Modifier.size(16.dp))
+                        }
+                    }
                 }
 
                 if (attachments.isNotEmpty()) {
@@ -192,7 +227,7 @@ fun ImageClipboardDialog(onDismiss: () -> Unit) {
                 Text("Upload to my server", style = MaterialTheme.typography.titleMedium)
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "Sends the actual file to your own server, so it can be downloaded anywhere — not limited to this phone the way clipboard copying is. Always overwrites the same file there.",
+                    "Sends the actual file to your own server, so it can be downloaded anywhere — not limited to this phone the way clipboard copying is. Always overwrites the same file there. Photos are saved as 1.jpg, videos as 1.mp4, other files as 1 plus their own ending (1.zip, 1.pdf...).",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center
@@ -234,7 +269,7 @@ fun ImageClipboardDialog(onDismiss: () -> Unit) {
                     TextButton(onClick = { showServerSettings = true }) { Text("Change server settings") }
                 }
 
-                if (!showServerSettings && attachments.isNotEmpty()) {
+                if (!showServerSettings && (attachments.isNotEmpty() || files.isNotEmpty())) {
                     val imageCount = attachments.count { context.contentResolver.getType(it)?.startsWith("image") == true }
                     if (imageCount > 0) {
                         Spacer(Modifier.height(8.dp))
@@ -293,8 +328,18 @@ fun ImageClipboardDialog(onDismiss: () -> Unit) {
                                         .onFailure { e -> lastError = e.message ?: "Upload failed" }
                                 }
 
+                                // Documents, zips and anything else: saved as 1.<its own ending>.
+                                val uploadedFiles = mutableListOf<String>()
+                                for (uri in files) {
+                                    val mimeType = context.contentResolver.getType(uri) ?: "application/octet-stream"
+                                    val name = serverNameFor(context, uri)
+                                    PersonalServerUploader.uploadAs(context, uri, mimeType, name)
+                                        .onSuccess { uploadedFiles.add(name) }
+                                        .onFailure { e -> lastError = e.message ?: "Upload failed" }
+                                }
+
                                 uploading = false
-                                if (lastError != null && !uploadedImage && !uploadedVideo) {
+                                if (lastError != null && !uploadedImage && !uploadedVideo && uploadedFiles.isEmpty()) {
                                     uploadStatus = lastError
                                 } else {
                                     // The script keeps images and videos in separate fixed slots
@@ -307,8 +352,9 @@ fun ImageClipboardDialog(onDismiss: () -> Unit) {
                                     val lines = mutableListOf<String>()
                                     if (uploadedImage) lines.add("Image: $folder/1.jpg")
                                     if (uploadedVideo) lines.add("Video: $folder/1.mp4")
+                                    uploadedFiles.forEach { lines.add("File: $folder/$it") }
                                     val message = "Uploaded to the following URL(s):\n" + lines.joinToString("\n")
-                                    uploadStatus = message
+                                    uploadStatus = if (lastError != null) message + "\n(Some did not upload: $lastError)" else message
                                     val manager = context.getSystemService(ClipboardManager::class.java)
                                     manager.setPrimaryClip(ClipData.newPlainText("Uploaded URL", message))
                                 }
@@ -349,4 +395,24 @@ fun ImageClipboardDialog(onDismiss: () -> Unit) {
             }
         }
     }
+}
+
+
+/** The file's name as the phone knows it (falls back to the last part of its address). */
+private fun displayNameOf(context: android.content.Context, uri: Uri): String {
+    val fromProvider = runCatching {
+        context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+            if (c.moveToFirst()) c.getString(0) else null
+        }
+    }.getOrNull()
+    return fromProvider?.takeIf { it.isNotBlank() } ?: (uri.lastPathSegment ?: "file")
+}
+
+/** "1" plus the file's own ending (1.zip, 1.pdf); the ending comes from its name, or from its type when the name has none. */
+private fun serverNameFor(context: android.content.Context, uri: Uri): String {
+    val fromName = displayNameOf(context, uri).substringAfterLast('.', "").lowercase().filter { it.isLetterOrDigit() }
+    val ext = fromName.ifEmpty {
+        context.contentResolver.getType(uri)?.let { MimeTypeMap.getSingleton().getExtensionFromMimeType(it) } ?: "bin"
+    }
+    return "1.$ext"
 }

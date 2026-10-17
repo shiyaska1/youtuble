@@ -52,27 +52,47 @@ object PersonalServerUploader {
         }
     }
 
+    /**
+     * For any kind of file (document, zip, rar...). It is saved on the server under [serverName] (e.g. "1.zip") instead of
+     * one of the fixed image/video slots: the script keeps a file's own name when no "type" is sent.
+     */
+    suspend fun uploadAs(context: Context, sourceUri: Uri, mimeType: String, serverName: String): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val tempFile = File.createTempFile("upload", ".tmp", context.cacheDir)
+            context.contentResolver.openInputStream(sourceUri)?.use { input ->
+                FileOutputStream(tempFile).use { output -> input.copyTo(output) }
+            } ?: error("Couldn't read the selected file")
+            try {
+                uploadFileBlocking(context, tempFile, mimeType, isVideo = false, serverName = serverName)
+            } finally {
+                tempFile.delete()
+            }
+        }
+    }
+
     /** For a file already on disk — e.g. the combined image ImageCombiner produces — no copy step needed. */
     suspend fun uploadFile(context: Context, file: File, mimeType: String, isVideo: Boolean = false): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching { uploadFileBlocking(context, file, mimeType, isVideo) }
     }
 
-    private fun uploadFileBlocking(context: Context, file: File, mimeType: String, isVideo: Boolean) {
+    private fun uploadFileBlocking(context: Context, file: File, mimeType: String, isVideo: Boolean, serverName: String? = null) {
         val url = PersonalServerSettings.getUploadUrl(context) ?: error("No server URL configured")
         val secret = PersonalServerSettings.getSecret(context)
         if (file.length() > CHUNK_BYTES && serverAcceptsPieces(url)) {
-            uploadInPieces(url, secret, file, isVideo)
+            uploadInPieces(url, secret, file, isVideo, serverName)
         } else {
-            uploadWhole(url, secret, file, mimeType, isVideo)
+            uploadWhole(url, secret, file, mimeType, isVideo, serverName)
         }
     }
 
-    private fun uploadWhole(url: String, secret: String, file: File, mimeType: String, isVideo: Boolean) {
-        val body = MultipartBody.Builder()
+    private fun uploadWhole(url: String, secret: String, file: File, mimeType: String, isVideo: Boolean, serverName: String?) {
+        val builder = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
             .addFormDataPart("key", secret)
-            .addFormDataPart("type", if (isVideo) "video" else "image")
-            .addFormDataPart("file", "upload", file.asRequestBody(mimeType.toMediaType()))
+        // No "type" for a named file: that is what makes the script keep the name it is given.
+        if (serverName == null) builder.addFormDataPart("type", if (isVideo) "video" else "image")
+        val body = builder
+            .addFormDataPart("file", serverName ?: "upload", file.asRequestBody(mimeType.toMediaType()))
             .build()
         val request = Request.Builder().url(url).post(body).build()
         client.newCall(request).execute().use { response ->
@@ -92,7 +112,7 @@ object PersonalServerUploader {
     }.getOrDefault(false)
 
     /** Sends the file one piece at a time (each tried up to 3 times); the server joins them when the last arrives. */
-    private fun uploadInPieces(url: String, secret: String, file: File, isVideo: Boolean) {
+    private fun uploadInPieces(url: String, secret: String, file: File, isVideo: Boolean, serverName: String?) {
         val id = ByteArray(16).also { SecureRandom().nextBytes(it) }.joinToString("") { "%02x".format(it) }
         val total = ((file.length() + CHUNK_BYTES - 1) / CHUNK_BYTES).toInt()
         file.inputStream().buffered().use { input ->
@@ -100,26 +120,27 @@ object PersonalServerUploader {
             for (index in 0 until total) {
                 val read = readFully(input, buffer)
                 val piece = if (read == buffer.size) buffer else buffer.copyOf(read)
-                val answer = sendPiece(url, secret, id, index, total, piece, isVideo)
+                val answer = sendPiece(url, secret, id, index, total, piece, isVideo, serverName)
                 val last = index == total - 1
                 if (last && answer != "OK") throw IOException("The server did not join the file (answer: $answer)")
             }
         }
     }
 
-    private fun sendPiece(url: String, secret: String, id: String, index: Int, total: Int, piece: ByteArray, isVideo: Boolean): String {
+    private fun sendPiece(url: String, secret: String, id: String, index: Int, total: Int, piece: ByteArray, isVideo: Boolean, serverName: String?): String {
         var lastError: Exception? = null
         for (attempt in 1..3) {
             try {
-                val body = MultipartBody.Builder()
+                val builder = MultipartBody.Builder()
                     .setType(MultipartBody.FORM)
                     .addFormDataPart("action", "chunk")
                     .addFormDataPart("key", secret)
                     .addFormDataPart("uploadId", id)
                     .addFormDataPart("index", index.toString())
                     .addFormDataPart("total", total.toString())
-                    .addFormDataPart("type", if (isVideo) "video" else "image")
-                    .addFormDataPart("name", "upload")
+                if (serverName == null) builder.addFormDataPart("type", if (isVideo) "video" else "image")
+                val body = builder
+                    .addFormDataPart("name", serverName ?: "upload")
                     .addFormDataPart("file", "piece", piece.toRequestBody("application/octet-stream".toMediaType()))
                     .build()
                 client.newCall(Request.Builder().url(url).post(body).build()).execute().use { response ->
