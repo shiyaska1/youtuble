@@ -1,6 +1,10 @@
 package com.mobicareapp.ui.handwriting
 
 import android.content.ClipData
+import com.mobicareapp.handwriting.SavedTexts
+import com.mobicareapp.handwriting.SavedText
+import androidx.compose.material.icons.filled.Bookmarks
+import androidx.compose.material.icons.filled.Save
 import kotlinx.coroutines.delay
 import com.mobicareapp.ui.transcribe.TranscribePickerDialog
 import com.mobicareapp.transcribe.TranscriptionRouter
@@ -998,6 +1002,35 @@ private fun TypeTextDialog(onInsert: (String, Float) -> Unit, onDismiss: () -> U
     val focus = remember { androidx.compose.ui.focus.FocusRequester() }
     LaunchedEffect(Unit) { runCatching { focus.requestFocus() } } // opens the keyboard straight away
 
+    // --- undo / redo: snapshots of the text, taken a moment after typing pauses ---
+    val history = remember { mutableStateListOf("") }
+    var pos by remember { mutableStateOf(0) }
+    fun commitPending() {
+        if (text != history[pos]) {
+            while (history.size > pos + 1) history.removeAt(history.size - 1)
+            history.add(text)
+            if (history.size > 100) history.removeAt(0)
+            pos = history.size - 1
+        }
+    }
+    LaunchedEffect(text) {
+        delay(500)
+        commitPending()
+    }
+    fun undo() {
+        commitPending()
+        if (pos > 0) { pos--; text = history[pos] }
+    }
+    fun redo() {
+        commitPending()
+        if (pos < history.size - 1) { pos++; text = history[pos] }
+    }
+
+    // --- saved texts (kept under a title for later) ---
+    var showSave by remember { mutableStateOf(false) }
+    var showSaved by remember { mutableStateOf(false) }
+    var savedTexts by remember { mutableStateOf(SavedTexts.load(context)) }
+
     // --- voice tools ---
     var showVoice by remember { mutableStateOf(false) }
     var showPicker by remember { mutableStateOf(false) }
@@ -1075,6 +1108,28 @@ private fun TypeTextDialog(onInsert: (String, Float) -> Unit, onDismiss: () -> U
         )
     }
 
+    if (showSave) {
+        SaveSnippetDialog(
+            onSave = { title ->
+                showSave = false
+                savedTexts = SavedTexts.add(context, title, text)
+                Toast.makeText(context, "Saved as \"" + title.trim() + "\"", Toast.LENGTH_SHORT).show()
+            },
+            onDismiss = { showSave = false }
+        )
+    }
+    if (showSaved) {
+        SavedTextsDialog(
+            items = savedTexts,
+            onUse = { chosen ->
+                showSaved = false
+                text = if (text.isBlank()) chosen.text else text.trimEnd() + "\n" + chosen.text
+            },
+            onDelete = { savedTexts = SavedTexts.delete(context, it.id) },
+            onDismiss = { showSaved = false }
+        )
+    }
+
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(
             modifier = Modifier.fillMaxSize().padding(8.dp),
@@ -1088,6 +1143,33 @@ private fun TypeTextDialog(onInsert: (String, Float) -> Unit, onDismiss: () -> U
                         Icon(Icons.Default.Mic, contentDescription = null, modifier = Modifier.size(20.dp))
                         Spacer(Modifier.width(6.dp))
                         Text(if (showVoice) "Hide voice" else "Voice", style = MaterialTheme.typography.titleMedium)
+                    }
+                }
+
+                // Undo / redo, copy to the clipboard, and keeping the text under a title for later.
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = { undo() }, enabled = pos > 0 || text != history[pos]) {
+                        Icon(Icons.Default.Undo, contentDescription = "Undo")
+                    }
+                    IconButton(onClick = { redo() }, enabled = pos < history.size - 1) {
+                        Icon(Icons.Default.Redo, contentDescription = "Redo")
+                    }
+                    IconButton(
+                        enabled = text.isNotBlank(),
+                        onClick = {
+                            context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Typed text", text))
+                            Toast.makeText(context, "Copied to the clipboard", Toast.LENGTH_SHORT).show()
+                        }
+                    ) { Icon(Icons.Default.ContentCopy, contentDescription = "Copy") }
+                    IconButton(enabled = text.isNotBlank(), onClick = { showSave = true }) {
+                        Icon(Icons.Default.Save, contentDescription = "Save with a title")
+                    }
+                    IconButton(onClick = { showSaved = true }) {
+                        Icon(Icons.Default.Bookmarks, contentDescription = "Saved texts")
+                    }
+                    Spacer(Modifier.weight(1f))
+                    if (savedTexts.isNotEmpty()) {
+                        Text("${savedTexts.size} saved", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
 
@@ -1198,6 +1280,75 @@ private fun TypeTextDialog(onInsert: (String, Float) -> Unit, onDismiss: () -> U
             }
         }
     }
+}
+
+/** The texts saved from the Type text window: search by title, tap one to put it in the box, or delete it. */
+@Composable
+private fun SavedTextsDialog(
+    items: List<SavedText>,
+    onUse: (SavedText) -> Unit,
+    onDelete: (SavedText) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var query by remember { mutableStateOf("") }
+    var pendingDelete by remember { mutableStateOf<SavedText?>(null) }
+    val matches = items.filter { it.title.contains(query.trim(), ignoreCase = true) || it.text.contains(query.trim(), ignoreCase = true) }
+
+    pendingDelete?.let { item ->
+        AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            title = { Text("Delete this saved text?") },
+            text = { Text("\"${item.title}\" will be removed. This can't be undone.") },
+            confirmButton = { TextButton(onClick = { onDelete(item); pendingDelete = null }) { Text("Yes, delete") } },
+            dismissButton = { TextButton(onClick = { pendingDelete = null }) { Text("No") } }
+        )
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Saved texts") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Tap one to put it in the text box.", style = MaterialTheme.typography.bodySmall)
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    singleLine = true,
+                    label = { Text("Search") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                if (items.isEmpty()) {
+                    Text("Nothing saved yet. Type something, then tap the save icon and give it a title.", style = MaterialTheme.typography.bodyMedium)
+                } else if (matches.isEmpty()) {
+                    Text("Nothing matches that.", style = MaterialTheme.typography.bodyMedium)
+                } else {
+                    LazyColumn(modifier = Modifier.heightIn(max = 340.dp)) {
+                        items(matches, key = { it.id }) { item ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth().clickable { onUse(item) }.padding(vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(item.title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text(
+                                        item.text.replace('\n', ' '),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                IconButton(onClick = { pendingDelete = item }) {
+                                    Icon(Icons.Default.Delete, contentDescription = "Delete")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } }
+    )
 }
 
 /** Asks for the title a piece of writing is saved under. */
