@@ -30,6 +30,11 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.remember
+import com.mobicareapp.applock.AppLockManager
+import com.mobicareapp.handwriting.CalculatorNotes
+import com.mobicareapp.ui.handwriting.TypeTextDialog
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.listSaver
@@ -114,6 +119,13 @@ private object BenchCabinetCalc {
 fun BenchCabinetScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     BackHandler(onBack = onBack)
+
+    // Keep the app lock off while this screen is in use.
+    DisposableEffect(Unit) {
+        AppLockManager.acquireLockHold()
+        onDispose { AppLockManager.releaseLockHold() }
+    }
+    var showNotes by remember { mutableStateOf(false) }
 
     // Kept across rotation / recreation.
     val values = rememberSaveable(saver = listSaver(save = { it.toList() }, restore = { it.toMutableStateList() })) {
@@ -246,11 +258,27 @@ fun BenchCabinetScreen(onBack: () -> Unit) {
                 Spacer(Modifier.height(0.dp).padding(start = 8.dp))
                 Text("Copy result")
             }
+            // A text popup (the same one the writing screen has) whose saved texts are a group of their own.
+            OutlinedButton(onClick = { showNotes = true }, modifier = Modifier.fillMaxWidth()) {
+                Text("Text notes (type, save with a title, search, copy)")
+            }
             Text(
                 "Balance = Total − (90×n90 + 75×n75 + 60×n60 + 45×n45 + An + An2 + Cor + Edge). It updates as you type.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            // Room so the last items are not hidden behind the bottom bar (Save / Library / Scan / Record).
+            Spacer(Modifier.height(96.dp))
         }
+    }
+
+    if (showNotes) {
+        TypeTextDialog(
+            onInsert = { _, _ -> },
+            onDismiss = { showNotes = false },
+            store = CalculatorNotes,
+            simple = true,
+            initialText = result
+        )
     }
 }

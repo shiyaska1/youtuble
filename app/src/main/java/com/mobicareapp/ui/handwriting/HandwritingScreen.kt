@@ -994,16 +994,23 @@ private suspend fun readTextInArea(
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun TypeTextDialog(onInsert: (String, Float) -> Unit, onDismiss: () -> Unit) {
+fun TypeTextDialog(
+    onInsert: (String, Float) -> Unit,
+    onDismiss: () -> Unit,
+    store: com.mobicareapp.handwriting.SavedTextStore = SavedTexts,
+    // The plain version (no voice, no font size, no Insert): just a box to type, copy and keep texts in.
+    simple: Boolean = false,
+    initialText: String = ""
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var text by remember { mutableStateOf("") }
+    var text by remember { mutableStateOf(initialText) }
     var size by remember { mutableStateOf(0.075f) }
     val focus = remember { androidx.compose.ui.focus.FocusRequester() }
     LaunchedEffect(Unit) { runCatching { focus.requestFocus() } } // opens the keyboard straight away
 
     // --- undo / redo: snapshots of the text, taken a moment after typing pauses ---
-    val history = remember { mutableStateListOf("") }
+    val history = remember { mutableStateListOf(initialText) }
     var pos by remember { mutableStateOf(0) }
     fun commitPending() {
         if (text != history[pos]) {
@@ -1029,7 +1036,7 @@ private fun TypeTextDialog(onInsert: (String, Float) -> Unit, onDismiss: () -> U
     // --- saved texts (kept under a title for later) ---
     var showSave by remember { mutableStateOf(false) }
     var showSaved by remember { mutableStateOf(false) }
-    var savedTexts by remember { mutableStateOf(SavedTexts.load(context)) }
+    var savedTexts by remember { mutableStateOf(store.load(context)) }
 
     // --- voice tools ---
     var showVoice by remember { mutableStateOf(false) }
@@ -1112,7 +1119,7 @@ private fun TypeTextDialog(onInsert: (String, Float) -> Unit, onDismiss: () -> U
         SaveSnippetDialog(
             onSave = { title ->
                 showSave = false
-                savedTexts = SavedTexts.add(context, title, text)
+                savedTexts = store.add(context, title, text)
                 Toast.makeText(context, "Saved as \"" + title.trim() + "\"", Toast.LENGTH_SHORT).show()
             },
             onDismiss = { showSave = false }
@@ -1125,7 +1132,7 @@ private fun TypeTextDialog(onInsert: (String, Float) -> Unit, onDismiss: () -> U
                 showSaved = false
                 text = if (text.isBlank()) chosen.text else text.trimEnd() + "\n" + chosen.text
             },
-            onDelete = { savedTexts = SavedTexts.delete(context, it.id) },
+            onDelete = { savedTexts = store.delete(context, it.id) },
             onDismiss = { showSaved = false }
         )
     }
@@ -1138,8 +1145,8 @@ private fun TypeTextDialog(onInsert: (String, Float) -> Unit, onDismiss: () -> U
         ) {
             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Type text", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
-                    OutlinedButton(onClick = { showVoice = !showVoice }) {
+                    Text(if (simple) "Notes" else "Type text", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
+                    if (!simple) OutlinedButton(onClick = { showVoice = !showVoice }) {
                         Icon(Icons.Default.Mic, contentDescription = null, modifier = Modifier.size(20.dp))
                         Spacer(Modifier.width(6.dp))
                         Text(if (showVoice) "Hide voice" else "Voice", style = MaterialTheme.typography.titleMedium)
@@ -1188,7 +1195,7 @@ private fun TypeTextDialog(onInsert: (String, Float) -> Unit, onDismiss: () -> U
                     modifier = Modifier.weight(1f).fillMaxWidth().focusRequester(focus)
                 )
 
-                if (showVoice) {
+                if (showVoice && !simple) {
                     Card(modifier = Modifier.fillMaxWidth()) {
                         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1265,15 +1272,17 @@ private fun TypeTextDialog(onInsert: (String, Float) -> Unit, onDismiss: () -> U
                     }
                 }
 
-                Text("Font size on the page", style = MaterialTheme.typography.labelLarge)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("Normal" to 0.045f, "Big" to 0.075f, "Extra big" to 0.11f).forEach { (label, value) ->
-                        FilterChip(selected = size == value, onClick = { size = value }, label = { Text(label, style = MaterialTheme.typography.titleMedium) })
+                if (!simple) {
+                    Text("Font size on the page", style = MaterialTheme.typography.labelLarge)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf("Normal" to 0.045f, "Big" to 0.075f, "Extra big" to 0.11f).forEach { (label, value) ->
+                            FilterChip(selected = size == value, onClick = { size = value }, label = { Text(label, style = MaterialTheme.typography.titleMedium) })
+                        }
                     }
                 }
                 Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
-                    TextButton(onClick = onDismiss) { Text("Cancel", style = MaterialTheme.typography.titleMedium) }
-                    TextButton(enabled = text.isNotBlank() && !recordingHere, onClick = { onInsert(text, size) }) {
+                    TextButton(onClick = onDismiss) { Text(if (simple) "Close" else "Cancel", style = MaterialTheme.typography.titleMedium) }
+                    if (!simple) TextButton(enabled = text.isNotBlank() && !recordingHere, onClick = { onInsert(text, size) }) {
                         Text("Insert", style = MaterialTheme.typography.titleMedium)
                     }
                 }
