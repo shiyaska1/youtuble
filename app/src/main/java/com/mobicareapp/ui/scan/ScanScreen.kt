@@ -37,6 +37,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Calculate
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.ArrowBack
@@ -124,6 +125,7 @@ fun ScanScreen() {
     var wifiSendFile by remember { mutableStateOf<File?>(null) }
     var showPassportPhoto by remember { mutableStateOf(false) }
     var showCollage by remember { mutableStateOf(false) }
+    var showBenchCalc by remember { mutableStateOf(false) }
     var showPdfTextExtract by remember { mutableStateOf(false) }
     var showImageMarkup by remember { mutableStateOf(false) }
     var showQuestionPaper by remember { mutableStateOf(false) }
@@ -170,6 +172,11 @@ fun ScanScreen() {
 
     if (showPassportPhoto) {
         PassportPhotoScreen(onBack = { showPassportPhoto = false })
+        return
+    }
+
+    if (showBenchCalc) {
+        BenchCabinetScreen(onBack = { showBenchCalc = false })
         return
     }
 
@@ -289,6 +296,11 @@ fun ScanScreen() {
                                 text = { Text("Combine photos into a grid") },
                                 onClick = { showMoreTools = false; showCollage = true },
                                 leadingIcon = { Icon(Icons.Default.GridView, contentDescription = null) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Bench cabinet calculator") },
+                                onClick = { showMoreTools = false; showBenchCalc = true },
+                                leadingIcon = { Icon(Icons.Default.Calculate, contentDescription = null) }
                             )
                             DropdownMenuItem(
                                 text = { Text("Mark up an image") },
