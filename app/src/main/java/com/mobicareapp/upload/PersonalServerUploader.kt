@@ -70,6 +70,42 @@ object PersonalServerUploader {
         }
     }
 
+    /** The page that adds to / deletes text files (uploadnew.php, next to the upload script). */
+    private fun noteScriptUrl(context: Context): String {
+        val url = PersonalServerSettings.getUploadUrl(context) ?: error("No server URL configured")
+        return url.substringBeforeLast('/') + "/uploadnew.php"
+    }
+
+    /** The full address of a file on the server, e.g. .../1.txt (null until the server is set up). */
+    fun remoteFileUrl(context: Context, name: String): String? =
+        PersonalServerSettings.getUploadUrl(context)?.let { it.substringBeforeLast('/') + "/" + name }
+
+    /** Adds [text] to the end of [name] on the server (what is already there stays). */
+    suspend fun appendText(context: Context, text: String, name: String = "1.txt"): Result<Unit> =
+        postNoteAction(context, "append", name, text)
+
+    /** Deletes [name] from the server (nothing happens if it is not there). */
+    suspend fun deleteRemoteFile(context: Context, name: String = "1.txt"): Result<Unit> =
+        postNoteAction(context, "delete", name, null)
+
+    private suspend fun postNoteAction(context: Context, action: String, name: String, text: String?): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val builder = okhttp3.FormBody.Builder()
+                .add("action", action)
+                .add("key", PersonalServerSettings.getSecret(context))
+            if (action == "delete") builder.add("file", name) else builder.add("name", name)
+            if (text != null) builder.add("text", text)
+            val request = Request.Builder().url(noteScriptUrl(context)).post(builder.build()).build()
+            client.newCall(request).execute().use { response ->
+                val answer = response.body?.string().orEmpty().trim()
+                if (!response.isSuccessful || answer != "OK") {
+                    val hint = if (response.code == 404 || answer.startsWith("Unknown action")) " - put the newest uploadnew.php on the server" else ""
+                    error("Server said: ${answer.take(120).ifEmpty { response.code.toString() }}$hint")
+                }
+            }
+        }
+    }
+
     /** For a file already on disk — e.g. the combined image ImageCombiner produces — no copy step needed. */
     suspend fun uploadFile(context: Context, file: File, mimeType: String, isVideo: Boolean = false): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching { uploadFileBlocking(context, file, mimeType, isVideo) }

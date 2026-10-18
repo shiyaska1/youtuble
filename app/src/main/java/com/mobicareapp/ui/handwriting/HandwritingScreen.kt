@@ -1,6 +1,8 @@
 package com.mobicareapp.ui.handwriting
 
 import android.content.ClipData
+import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.CloudUpload
 import com.mobicareapp.handwriting.SavedTexts
 import com.mobicareapp.handwriting.SavedText
 import androidx.compose.material.icons.filled.Bookmarks
@@ -1036,6 +1038,10 @@ fun TypeTextDialog(
     // --- saved texts (kept under a title for later) ---
     var showSave by remember { mutableStateOf(false) }
     var showSaved by remember { mutableStateOf(false) }
+    // The plain (notes) version can add its text to 1.txt on the user's server.
+    var serverStatus by remember { mutableStateOf<String?>(null) }
+    var serverBusy by remember { mutableStateOf(false) }
+    var confirmClear by remember { mutableStateOf(false) }
     var savedTexts by remember { mutableStateOf(store.load(context)) }
 
     // --- voice tools ---
@@ -1115,6 +1121,27 @@ fun TypeTextDialog(
         )
     }
 
+    if (confirmClear) {
+        AlertDialog(
+            onDismissRequest = { confirmClear = false },
+            title = { Text("Delete 1.txt on the server?") },
+            text = { Text("Everything uploaded to 1.txt so far will be removed. This can't be undone.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmClear = false
+                    serverBusy = true
+                    serverStatus = "Deleting…"
+                    scope.launch {
+                        PersonalServerUploader.deleteRemoteFile(context, "1.txt")
+                            .onSuccess { serverStatus = "1.txt deleted from the server" }
+                            .onFailure { e -> serverStatus = e.message ?: "Couldn't delete" }
+                        serverBusy = false
+                    }
+                }) { Text("Yes, delete") }
+            },
+            dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("No") } }
+        )
+    }
     if (showSave) {
         SaveSnippetDialog(
             onSave = { title ->
@@ -1178,6 +1205,40 @@ fun TypeTextDialog(
                     if (savedTexts.isNotEmpty()) {
                         Text("${savedTexts.size} saved", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
+                }
+
+                // Notes only: add the text to the end of 1.txt on the server, clear that file, or copy its address.
+                if (simple) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Button(
+                            enabled = text.isNotBlank() && !serverBusy,
+                            onClick = {
+                                serverBusy = true
+                                serverStatus = "Uploading…"
+                                scope.launch {
+                                    PersonalServerUploader.appendText(context, text, "1.txt")
+                                        .onSuccess { serverStatus = "Added to the end of 1.txt on the server" }
+                                        .onFailure { e -> serverStatus = e.message ?: "Upload failed" }
+                                    serverBusy = false
+                                }
+                            }
+                        ) {
+                            Icon(Icons.Default.CloudUpload, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Upload")
+                        }
+                        OutlinedButton(enabled = !serverBusy, onClick = { confirmClear = true }) { Text("Clear") }
+                        IconButton(onClick = {
+                            val link = PersonalServerUploader.remoteFileUrl(context, "1.txt")
+                            if (link == null) {
+                                serverStatus = "Set up your server first (Record, Copy images/videos)"
+                            } else {
+                                context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("1.txt address", link))
+                                serverStatus = "Copied: $link"
+                            }
+                        }) { Icon(Icons.Default.Link, contentDescription = "Copy the 1.txt address") }
+                    }
+                    serverStatus?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                 }
 
                 // The box takes all the room that is left, so a long text can be typed and read.
