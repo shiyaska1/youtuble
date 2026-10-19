@@ -96,8 +96,7 @@ class MainActivity : FragmentActivity() {
         handleShareIntent(intent)
         // A fresh launch (not a rotation/recreation, and not a record shortcut) opens the handwriting notepad for quick notes.
         if (savedInstanceState == null && intent?.getStringExtra(EXTRA_QUICK_ACTION) == null &&
-            intent?.action != Intent.ACTION_SEND && intent?.action != Intent.ACTION_SEND_MULTIPLE &&
-            HandwritingStore.isOpenAtStartup(this)
+            intent?.action != Intent.ACTION_SEND && intent?.action != Intent.ACTION_SEND_MULTIPLE
         ) {
             HandwritingStartup.request()
         }

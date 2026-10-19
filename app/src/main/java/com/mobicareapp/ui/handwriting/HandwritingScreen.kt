@@ -288,7 +288,6 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
         if (shared.isNotEmpty()) viewModel.handleShared(shared)
     }
     var startChoiceDone by remember { mutableStateOf(false) }
-    var openAtStartup by remember { mutableStateOf(HandwritingStore.isOpenAtStartup(context)) }
     var previewText by remember { mutableStateOf("") }
     var panelOpen by remember { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
@@ -789,14 +788,6 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
                     DropdownMenuItem(
                         text = { Text("Upload all pages to my server (1.jpg)") },
                         onClick = { menuOpen = false; uploadAllPages() }
-                    )
-                    DropdownMenuItem(
-                        text = { Text(if (openAtStartup) "Open this pad when the app starts: ON" else "Open this pad when the app starts: OFF") },
-                        onClick = {
-                            menuOpen = false
-                            openAtStartup = !openAtStartup
-                            HandwritingStore.setOpenAtStartup(context, openAtStartup)
-                        }
                     )
                     DropdownMenuItem(text = { Text("Clear this screen (keep it, empty it)") }, onClick = { menuOpen = false; confirmClearPage = true })
                     DropdownMenuItem(

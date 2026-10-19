@@ -475,7 +475,8 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
         val page = _pages.value.getOrNull(index) ?: return
         if (snippet.items.isEmpty()) return
         val snippetTop = HwPage(items = snippet.items).highestY
-        val targetTop = if (page.items.isEmpty()) INSERT_MARGIN else page.lowestY + INSERT_GAP
+        val below = lowestContentY(page)
+        val targetTop = if (below == 0f) INSERT_MARGIN else below + INSERT_GAP
         val timeShift = if (page.items.isEmpty()) 0L else ItemTransform.lastTime(page.items) + 1000L - ItemTransform.firstTime(snippet.items)
         val group = (System.currentTimeMillis() % Int.MAX_VALUE).toInt().coerceAtLeast(1)
         val moved = ItemTransform.shifted(snippet.items, targetTop - snippetTop, timeShift, group)
@@ -560,6 +561,25 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
         recognizeJobs.clear()
         _pages.value.forEachIndexed { i, page -> if (page.items.isNotEmpty() && !page.textEdited) scheduleRecognition(i, 0) }
     }
+
+    /**
+     * Where the picture on [page] ends, in page widths (0 when there is none). The picture is fitted to
+     * the whole screen and centred, exactly as the pad and the export draw it.
+     */
+    private fun pictureBottom(page: HwPage): Float {
+        val path = page.imagePath ?: return 0f
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        runCatching { BitmapFactory.decodeFile(path, bounds) }
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return 0f
+        val ratio = pageRatio
+        val scale = minOf(1f / bounds.outWidth, ratio / bounds.outHeight)
+        val height = bounds.outHeight * scale
+        return (ratio - height) / 2f + height
+    }
+
+    /** The lowest point taken on the screen by writing or by its picture, in page widths; 0 for an empty screen. */
+    private fun lowestContentY(page: HwPage): Float =
+        maxOf(if (page.items.isEmpty()) 0f else page.lowestY, pictureBottom(page))
 
     // --- voice -> text on the latest blank screen ------------------------------------------------
 
@@ -667,7 +687,9 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
         val lineHeight = size * 1.55f
         val topBaseline = 0.05f + size
         val lastBaseline = pageRatio.coerceIn(1f, 4f) - 0.06f
-        val startBaseline = if (page.items.isEmpty()) topBaseline else page.lowestY + 0.03f + size
+        // Below the writing AND below the picture on this screen: text never goes over a picture.
+        val below = lowestContentY(page)
+        val startBaseline = if (below == 0f) topBaseline else below + 0.03f + size
         val firstCapacity = if (startBaseline > lastBaseline) 0 else ((lastBaseline - startBaseline) / lineHeight).toInt() + 1
         val perPage = (((lastBaseline - topBaseline) / lineHeight).toInt() + 1).coerceAtLeast(1)
 
