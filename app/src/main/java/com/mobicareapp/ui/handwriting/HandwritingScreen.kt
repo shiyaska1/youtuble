@@ -3,6 +3,8 @@ package com.mobicareapp.ui.handwriting
 import android.content.ClipData
 import com.mobicareapp.handwriting.ItemGeometry
 import com.mobicareapp.handwriting.HandwritingStyle
+import com.mobicareapp.handwriting.TypedDraft
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.OpenWith
@@ -275,6 +277,18 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
         onDispose { AppLockManager.releaseLockHold() }
     }
 
+    // Whenever the screen leaves the front (home, recents, swiped away, another app), everything is written to disk at once.
+    DisposableEffect(Unit) {
+        var owner: Context? = context
+        while (owner is android.content.ContextWrapper && owner !is androidx.lifecycle.LifecycleOwner) owner = owner.baseContext
+        val lifecycle = (owner as? androidx.lifecycle.LifecycleOwner)?.lifecycle
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_PAUSE || event == androidx.lifecycle.Lifecycle.Event.ON_STOP) viewModel.saveNow()
+        }
+        lifecycle?.addObserver(observer)
+        onDispose { lifecycle?.removeObserver(observer) }
+    }
+
     // When the notepad opens with earlier writing in it, ask once: carry on with it, or start a clean
     // single page for a quick note. Decided at the moment of opening, so it never pops up mid-writing.
     // (Not when something was just shared to the app: that goes onto the first free screen, and a
@@ -304,7 +318,8 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
     var selecting by remember { mutableStateOf(false) }
     var ocrBusy by remember { mutableStateOf(false) }
     var ocrText by remember { mutableStateOf<String?>(null) }
-    var showTypeText by remember { mutableStateOf(false) }
+    // Open again if the app was closed with the Type text window open (its text is kept).
+    var showTypeText by rememberSaveable { mutableStateOf(TypedDraft.isOpen(context)) }
     var showVoicePicker by remember { mutableStateOf(false) }
     var showSaveSnippet by remember { mutableStateOf(false) }
     var showInsertSnippet by remember { mutableStateOf(false) }
@@ -1160,13 +1175,14 @@ fun TypeTextDialog(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var text by remember { mutableStateOf(initialText) }
+    // Typed text not yet on the page is kept (see TypedDraft), so it is back if the app was closed.
+    var text by remember { mutableStateOf(initialText.ifEmpty { if (simple) "" else TypedDraft.text(context) }) }
     var size by remember { mutableStateOf(0.075f) }
     val focus = remember { androidx.compose.ui.focus.FocusRequester() }
     LaunchedEffect(Unit) { runCatching { focus.requestFocus() } } // opens the keyboard straight away
 
     // --- undo / redo: snapshots of the text, taken a moment after typing pauses ---
-    val history = remember { mutableStateListOf(initialText) }
+    val history = remember { mutableStateListOf(text) }
     var pos by remember { mutableStateOf(0) }
     fun commitPending() {
         if (text != history[pos]) {
@@ -1187,6 +1203,25 @@ fun TypeTextDialog(
     fun redo() {
         commitPending()
         if (pos < history.size - 1) { pos++; text = history[pos] }
+    }
+
+    // --- draft: the text is kept as it is typed, so a crash, a swipe-away or closing the app loses nothing ---
+    var inserted by remember { mutableStateOf(false) }
+    val textNow by rememberUpdatedState(text)
+    LaunchedEffect(text) {
+        if (!simple) {
+            delay(200)
+            TypedDraft.setText(context, text)
+        }
+    }
+    DisposableEffect(Unit) {
+        if (!simple) TypedDraft.setOpen(context, true)
+        onDispose { if (!simple && !inserted) TypedDraft.setText(context, textNow) }
+    }
+    // Closing it on purpose: the text stays saved, but the window will not pop up by itself next time.
+    val closeDialog = {
+        if (!simple) TypedDraft.setOpen(context, false)
+        onDismiss()
     }
 
     // --- saved texts (kept under a title for later) ---
@@ -1232,15 +1267,21 @@ fun TypeTextDialog(
     fun transcribe(file: File) {
         voiceError = null
         voiceStatus = "Transcribing…"
+        // Remembered until its text is in the box, so a kill in between is picked up again next time.
+        if (!simple) TypedDraft.setPendingVoice(context, file.absolutePath)
         scope.launch {
             val result = TranscriptionRouter.transcribe(context, file, "en") { status -> voiceStatus = status }
             voiceStatus = null
             result
                 .onSuccess { heard ->
                     if (heard.isBlank()) voiceError = "No speech was recognized"
-                    else text = if (text.isBlank()) heard.trim() else text.trimEnd() + " " + heard.trim()
+                    else {
+                        text = if (text.isBlank()) heard.trim() else text.trimEnd() + " " + heard.trim()
+                        if (!simple) TypedDraft.setText(context, text)
+                    }
                 }
                 .onFailure { e -> voiceError = e.message ?: "Couldn't transcribe that" }
+            if (!simple) TypedDraft.setPendingVoice(context, null)
         }
     }
 
@@ -1275,6 +1316,21 @@ fun TypeTextDialog(
             startRecording()
             delay(2000)
             if (RecordingStatus.active.value == null && RecordingStatus.error.value == null) startRecording()
+        }
+    }
+    // A recording that was being transcribed when the app was closed carries on now.
+    LaunchedEffect(Unit) {
+        if (!simple) {
+            val path = TypedDraft.pendingVoice(context)
+            if (path != null) {
+                val file = File(path)
+                if (file.exists() && hasKey) {
+                    showVoice = true
+                    transcribe(file)
+                } else {
+                    TypedDraft.setPendingVoice(context, null)
+                }
+            }
         }
     }
     val recorderError by RecordingStatus.error.collectAsState()
@@ -1330,7 +1386,7 @@ fun TypeTextDialog(
         )
     }
 
-    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+    Dialog(onDismissRequest = closeDialog, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(
             modifier = Modifier.fillMaxSize().padding(8.dp),
             shape = RoundedCornerShape(20.dp),
@@ -1367,6 +1423,10 @@ fun TypeTextDialog(
                     }
                     IconButton(onClick = { showSaved = true }) {
                         Icon(Icons.Default.Bookmarks, contentDescription = "Saved texts")
+                    }
+                    // Empties the box in one tap (Undo brings it back).
+                    TextButton(enabled = text.isNotBlank(), onClick = { commitPending(); text = "" }) {
+                        Text("Clear", style = MaterialTheme.typography.titleMedium)
                     }
                     Spacer(Modifier.weight(1f))
                     if (savedTexts.isNotEmpty()) {
@@ -1514,8 +1574,15 @@ fun TypeTextDialog(
                     }
                 }
                 Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
-                    TextButton(onClick = onDismiss) { Text(if (simple) "Close" else "Cancel", style = MaterialTheme.typography.titleMedium) }
-                    if (!simple) TextButton(enabled = text.isNotBlank() && !recordingHere, onClick = { onInsert(text, size) }) {
+                    TextButton(onClick = closeDialog) { Text(if (simple) "Close" else "Cancel", style = MaterialTheme.typography.titleMedium) }
+                    if (!simple) TextButton(
+                        enabled = text.isNotBlank() && !recordingHere,
+                        onClick = {
+                            inserted = true
+                            TypedDraft.clear(context)
+                            onInsert(text, size)
+                        }
+                    ) {
                         Text("Insert", style = MaterialTheme.typography.titleMedium)
                     }
                 }

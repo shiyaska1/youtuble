@@ -24,6 +24,7 @@ import com.mobicareapp.handwriting.SharedItem
 import com.mobicareapp.handwriting.WordItem
 import com.mobicareapp.handwriting.WordSuggester
 import com.mobicareapp.handwriting.HandwritingStyle
+import com.mobicareapp.handwriting.TypedDraft
 import com.mobicareapp.handwriting.ItemGeometry
 import com.mobicareapp.textextract.PdfTextExtractor
 import kotlinx.coroutines.Dispatchers
@@ -594,6 +595,8 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
 
     /** [firstBlank] false = the latest blank screen (picked voice), true = the first blank screen (shared voice). */
     private suspend fun transcribeNow(file: File, firstBlank: Boolean) {
+        // Remembered until the text is safely on the page, so a kill in between is picked up again next time.
+        TypedDraft.setPadVoice(context, file.absolutePath, firstBlank)
         _importStatus.value = "Transcribing the voice…"
         val result = com.mobicareapp.transcribe.TranscriptionRouter.transcribe(context, file, "en") { status ->
             _importStatus.value = status
@@ -605,6 +608,8 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
                 else insertTextOnBlankPage(text.trim(), firstBlank)
             }
             .onFailure { e -> _readError.value = e.message ?: "Couldn't transcribe that recording" }
+        saveNow()
+        TypedDraft.clearPadVoice(context)
     }
 
     /**
@@ -746,6 +751,14 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
     private val _importStatus = MutableStateFlow<String?>(null)
     /** Progress text while a PDF is being turned into pages (null otherwise). */
     val importStatus: StateFlow<String?> = _importStatus.asStateFlow()
+
+    init {
+        // A voice that was being transcribed when the app was closed or killed carries on now.
+        TypedDraft.padVoice(application)?.let { (path, firstBlank) ->
+            val file = File(path)
+            if (file.exists()) viewModelScope.launch { transcribeNow(file, firstBlank) } else TypedDraft.clearPadVoice(application)
+        }
+    }
 
     /**
      * Puts a PDF into the notepad with every page on a screen of its own: the first PDF page goes on
@@ -1041,9 +1054,15 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
     private fun persist() {
         saveJob?.cancel()
         saveJob = viewModelScope.launch {
-            delay(400)
+            delay(200)
             withContext(Dispatchers.IO) { HandwritingStore.save(context, _pages.value) }
         }
+    }
+
+    /** Writes the notepad to disk right now (the screen is leaving the front: the app may be swiped away or killed next). */
+    fun saveNow() {
+        saveJob?.cancel()
+        HandwritingStore.save(context, _pages.value)
     }
 
     override fun onCleared() {

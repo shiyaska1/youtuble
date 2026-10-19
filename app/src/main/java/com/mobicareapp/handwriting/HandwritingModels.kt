@@ -129,13 +129,34 @@ object HandwritingStore {
     // --- pages -----------------------------------------------------------------------------
 
     fun load(context: Context): List<HwPage> {
-        val file = File(context.filesDir, FILE_NAME)
-        if (!file.exists()) return listOf(HwPage())
-        return runCatching { pagesFromJson(JSONArray(file.readText())) }.getOrDefault(listOf(HwPage()))
+        // The draft, else the copy before it, else a write that was interrupted before it was swapped in.
+        for (name in listOf(FILE_NAME, "$FILE_NAME.bak", "$FILE_NAME.tmp")) {
+            val file = File(context.filesDir, name)
+            if (!file.exists()) continue
+            val pages = runCatching { pagesFromJson(JSONArray(file.readText())) }.getOrNull()
+            if (pages != null) return pages
+        }
+        return listOf(HwPage())
     }
 
+    /**
+     * Written to a temporary file first and swapped in afterwards, keeping the previous version as a
+     * backup, so a crash or a kill in the middle of saving never leaves the notepad empty or half-written.
+     */
+    @Synchronized
     fun save(context: Context, pages: List<HwPage>) {
-        File(context.filesDir, FILE_NAME).writeText(pagesToJson(pages).toString())
+        val file = File(context.filesDir, FILE_NAME)
+        val tmp = File(context.filesDir, "$FILE_NAME.tmp")
+        val bak = File(context.filesDir, "$FILE_NAME.bak")
+        tmp.writeText(pagesToJson(pages).toString())
+        if (file.exists()) {
+            bak.delete()
+            file.renameTo(bak)
+        }
+        if (!tmp.renameTo(file)) {
+            // Could not swap it in: put the old one back so it is not lost.
+            if (!file.exists() && bak.exists()) bak.renameTo(file)
+        }
     }
 
     /** Pages as JSON — shared by the notepad's own draft and by saved notes. */
