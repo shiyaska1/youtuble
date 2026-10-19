@@ -1336,7 +1336,11 @@ fun TypeTextDialog(
             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(if (simple) "Notes" else "Type text", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
-                    if (!simple) OutlinedButton(onClick = { showVoice = !showVoice }) {
+                    // Opening the voice tools starts recording at once, so it can't be forgotten (needs the engine's key first).
+                    if (!simple) OutlinedButton(onClick = {
+                        showVoice = !showVoice
+                        if (showVoice && !recordingHere && voiceStatus == null && hasKey) startRecording()
+                    }) {
                         Icon(Icons.Default.Mic, contentDescription = null, modifier = Modifier.size(20.dp))
                         Spacer(Modifier.width(6.dp))
                         Text(if (showVoice) "Hide voice" else "Voice", style = MaterialTheme.typography.titleMedium)
