@@ -1276,6 +1276,18 @@ fun TypeTextDialog(
         }
     }
 
+    // Opening the voice tools starts recording at once, so it can't be forgotten (the engine needs its key first).
+    // If the recorder has not reported back after a moment, it is asked once more (a second start is ignored when it is already running).
+    LaunchedEffect(showVoice) {
+        if (showVoice && !recordingHere && voiceStatus == null && hasKey) {
+            RecordingStatus.errorShown()
+            startRecording()
+            delay(2000)
+            if (RecordingStatus.active.value == null && RecordingStatus.error.value == null) startRecording()
+        }
+    }
+    val recorderError by RecordingStatus.error.collectAsState()
+
     if (showPicker) {
         // Recordings already in the Library, or any audio file on the phone.
         TranscribePickerDialog(
@@ -1337,10 +1349,7 @@ fun TypeTextDialog(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(if (simple) "Notes" else "Type text", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
                     // Opening the voice tools starts recording at once, so it can't be forgotten (needs the engine's key first).
-                    if (!simple) OutlinedButton(onClick = {
-                        showVoice = !showVoice
-                        if (showVoice && !recordingHere && voiceStatus == null && hasKey) startRecording()
-                    }) {
+                    if (!simple) OutlinedButton(onClick = { showVoice = !showVoice }) {
                         Icon(Icons.Default.Mic, contentDescription = null, modifier = Modifier.size(20.dp))
                         Spacer(Modifier.width(6.dp))
                         Text(if (showVoice) "Hide voice" else "Voice", style = MaterialTheme.typography.titleMedium)
@@ -1489,6 +1498,11 @@ fun TypeTextDialog(
                                     }
                                 ) { Text("Save key", style = MaterialTheme.typography.titleMedium) }
                             }
+                            if (recordingHere) {
+                                Text("Recording… speak now, then press Stop", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.error)
+                            }
+                            // Why the recorder could not start (the microphone in use by a call, a permission...), instead of failing silently.
+                            recorderError?.let { Text("Recorder: $it", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error) }
                             voiceStatus?.let { Text(it, style = MaterialTheme.typography.bodyLarge) }
                             voiceError?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error) }
                             Text(
