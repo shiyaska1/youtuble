@@ -64,6 +64,26 @@
                 android:resource="@xml/shortcuts" />
         </activity>
 
+        <!-- "Upload to my server" in other apps' Share menu: any file (video, Excel, zip...) goes straight to the user's server. -->
+        <activity
+            android:name=".ui.upload.ShareUploadActivity"
+            android:exported="true"
+            android:label="Upload to my server"
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.YtSaver">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".upload.ShareUploadService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
         <service
             android:name=".download.DownloadService"
             android:exported="false"

@@ -1,0 +1,191 @@
+package com.mobicareapp.ui.upload
+
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import com.mobicareapp.MainActivity
+import com.mobicareapp.ui.theme.YtSaverTheme
+import com.mobicareapp.upload.PersonalServerSettings
+import com.mobicareapp.upload.ShareUploadItem
+import com.mobicareapp.upload.ShareUploadService
+import com.mobicareapp.upload.ShareUploadState
+import com.mobicareapp.upload.UploadStatus
+
+/**
+ * "Upload to my server" in another app's Share menu (WhatsApp, a file manager, the gallery): whatever is
+ * shared (a video, an Excel sheet, a zip, anything) is uploaded straight to the user's server, big files
+ * included. This screen shows the progress; it can be left, and the upload carries on (see the notification).
+ * When it finishes it says so and the address is copied to the clipboard.
+ */
+class ShareUploadActivity : ComponentActivity() {
+    private var notConfigured = false
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        if (savedInstanceState == null) handleShare(intent)
+        setContent {
+            YtSaverTheme {
+                Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                    ShareUploadScreen(notConfigured = notConfigured, onClose = { finish() })
+                }
+            }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleShare(intent)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Back in front after a finished upload: make sure the address is on the clipboard.
+        if (!ShareUploadState.running.value) ShareUploadState.copyUrls(this)
+    }
+
+    private fun handleShare(intent: Intent?) {
+        val uris: List<Uri> = when (intent?.action) {
+            Intent.ACTION_SEND -> listOfNotNull(
+                if (Build.VERSION.SDK_INT >= 33) intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                else @Suppress("DEPRECATION") intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+            )
+            Intent.ACTION_SEND_MULTIPLE ->
+                (if (Build.VERSION.SDK_INT >= 33) intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                else @Suppress("DEPRECATION") intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)).orEmpty()
+            else -> return // opened from the notification: just show what is there
+        }
+        // Handled once, even if the screen is recreated.
+        intent?.action = null
+        if (uris.isEmpty()) {
+            Toast.makeText(this, "Nothing to upload: no file was shared.", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (!PersonalServerSettings.isConfigured(this)) {
+            notConfigured = true
+            return
+        }
+        ShareUploadService.start(this, uris)
+    }
+}
+
+@Composable
+private fun ShareUploadScreen(notConfigured: Boolean, onClose: () -> Unit) {
+    val context = LocalContext.current
+    val items by ShareUploadState.items.collectAsState()
+    val running by ShareUploadState.running.collectAsState()
+    val allDone = !running && items.isNotEmpty()
+    val urls = items.filter { it.status == UploadStatus.DONE }.mapNotNull { it.url }
+
+    // The moment it finishes: the address goes on the clipboard.
+    LaunchedEffect(allDone, urls.size) {
+        if (allDone && urls.isNotEmpty()) ShareUploadState.copyUrls(context)
+    }
+
+    Column(
+        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Text("Upload to my server", style = MaterialTheme.typography.headlineSmall)
+
+        if (notConfigured && items.isEmpty()) {
+            Text("Your server is not set up yet. Open YT Saver, go to Record, Copy images/videos, and save the server address and key. Then share again.")
+            Button(onClick = {
+                context.startActivity(Intent(context, MainActivity::class.java))
+                onClose()
+            }) { Text("Open YT Saver") }
+            return@Column
+        }
+
+        if (items.isEmpty()) Text("Nothing is being uploaded.")
+        items.forEach { ItemRow(it) }
+
+        if (running) {
+            Text(
+                "You can leave this screen: the upload carries on, and the notification shows how far it is.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            OutlinedButton(onClick = { ShareUploadService.cancel(context) }) { Text("Cancel the upload") }
+        }
+
+        if (allDone) {
+            if (urls.isNotEmpty()) {
+                Text(
+                    if (urls.size == items.size) "Finished. The URL is copied to the clipboard." else "Finished with some problems. The URL of what went through is copied.",
+                    style = MaterialTheme.typography.titleMedium
+                )
+                OutlinedTextField(
+                    value = urls.joinToString("\n"),
+                    onValueChange = {},
+                    readOnly = true,
+                    label = { Text("Uploaded URL (tap and hold to select)") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = {
+                        ShareUploadState.copyUrls(context)
+                        Toast.makeText(context, "URL copied", Toast.LENGTH_SHORT).show()
+                    }) { Text("Copy the URL again") }
+                    OutlinedButton(onClick = onClose) { Text("Close") }
+                }
+            } else {
+                Text("The upload did not finish.", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.error)
+                OutlinedButton(onClick = onClose) { Text("Close") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ItemRow(item: ShareUploadItem) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("${item.label}  →  ${item.serverName}", style = MaterialTheme.typography.titleSmall)
+        when (item.status) {
+            UploadStatus.WAITING -> Text("Waiting…", style = MaterialTheme.typography.bodySmall)
+            UploadStatus.UPLOADING -> {
+                val fraction = if (item.size > 0) (item.sent.toFloat() / item.size).coerceIn(0f, 1f) else 0f
+                LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
+                Text("${size(item.sent)} of ${size(item.size)}  (${(fraction * 100).toInt()}%)", style = MaterialTheme.typography.bodySmall)
+            }
+            UploadStatus.DONE -> Text("Uploaded (${size(item.size)})", style = MaterialTheme.typography.bodySmall)
+            UploadStatus.FAILED -> Text("Failed: ${item.error ?: "unknown error"}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        }
+        Spacer(Modifier.height(2.dp))
+    }
+}
+
+private fun size(bytes: Long): String = when {
+    bytes >= 1_073_741_824L -> "%.2f GB".format(bytes / 1_073_741_824.0)
+    bytes >= 1_048_576L -> "%.1f MB".format(bytes / 1_048_576.0)
+    bytes >= 1024L -> "%.0f KB".format(bytes / 1024.0)
+    else -> "$bytes B"
+}
