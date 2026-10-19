@@ -25,7 +25,7 @@ object HandwritingExport {
     private const val INK_WIDTH = 0.0048f
 
     /** [pageRatio] is a page's height divided by its width, as it was on this phone's pad. */
-    fun renderAll(pages: List<HwPage>, pageRatio: Float): Bitmap {
+    fun renderAll(pages: List<HwPage>, pageRatio: Float, normalFont: Boolean = false): Bitmap {
         val ratio = pageRatio.coerceIn(0.5f, 4f)
         var width = PAGE_WIDTH_PX
         var pageHeight = (width * ratio).toInt()
@@ -43,14 +43,14 @@ object HandwritingExport {
             canvas.save()
             canvas.translate(0f, (index * pageHeight).toFloat())
             canvas.clipRect(0, 0, width, pageHeight)
-            drawPage(canvas, page, width, pageHeight)
+            drawPage(canvas, page, width, pageHeight, normalFont)
             canvas.restore()
             if (index > 0) canvas.drawLine(0f, (index * pageHeight).toFloat(), width.toFloat(), (index * pageHeight).toFloat(), divider)
         }
         return bitmap
     }
 
-    private fun drawPage(canvas: Canvas, page: HwPage, width: Int, height: Int) {
+    private fun drawPage(canvas: Canvas, page: HwPage, width: Int, height: Int, normalFont: Boolean) {
         page.imagePath?.let { path -> drawFittedImage(canvas, path, width, height) }
 
         val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -63,14 +63,18 @@ object HandwritingExport {
         val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = INK; style = Paint.Style.FILL }
         val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = INK
-            typeface = Typeface.create("cursive", Typeface.NORMAL)
+            typeface = Typeface.create(if (normalFont) "sans-serif" else "cursive", Typeface.NORMAL)
         }
 
         for (item in page.items) {
+            val color = if (item.color != 0) item.color else INK
+            strokePaint.color = color
+            dotPaint.color = color
+            textPaint.color = color
             when (item) {
                 is InkItem -> drawStroke(canvas, item.stroke, width, strokePaint, dotPaint)
                 is WordItem -> {
-                    textPaint.textSize = item.size * width * 1.15f
+                    textPaint.textSize = item.size * width * (if (normalFont) 0.95f else 1.15f)
                     canvas.save()
                     canvas.translate(item.x * width, item.y * width)
                     canvas.rotate(Math.toDegrees(item.angle.toDouble()).toFloat())

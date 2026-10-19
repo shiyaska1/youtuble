@@ -26,9 +26,12 @@ data class HwStroke(val points: List<InkPt>) {
  */
 sealed interface PageItem {
     val group: Int
+
+    /** The colour it is drawn in (an ARGB value), or 0 for the default dark blue. */
+    val color: Int
 }
 
-data class InkItem(val stroke: HwStroke, override val group: Int = 0) : PageItem
+data class InkItem(val stroke: HwStroke, override val group: Int = 0, override val color: Int = 0) : PageItem
 
 /**
  * A word the writer completed by tapping a suggestion instead of writing all of it. It is drawn in
@@ -44,7 +47,8 @@ data class WordItem(
     val size: Float,
     val replaced: List<HwStroke>,
     val angle: Float = 0f,
-    override val group: Int = 0
+    override val group: Int = 0,
+    override val color: Int = 0
 ) : PageItem {
     /** Rough width, only used to tell where this word sits among neighbouring handwriting. */
     val width: Float get() = text.length * size * 0.5f
@@ -202,7 +206,7 @@ object HandwritingStore {
     private fun itemsFromJson(array: JSONArray): List<PageItem> = (0 until array.length()).map { itemFromJson(array.getJSONObject(it)) }
 
     private fun itemToJson(item: PageItem): JSONObject = when (item) {
-        is InkItem -> JSONObject().put("k", "s").put("p", strokeToJson(item.stroke)).put("g", item.group)
+        is InkItem -> JSONObject().put("k", "s").put("p", strokeToJson(item.stroke)).put("g", item.group).put("c", item.color)
         is WordItem -> JSONObject()
             .put("k", "w")
             .put("t", item.text)
@@ -211,6 +215,7 @@ object HandwritingStore {
             .put("z", item.size.toDouble())
             .put("a", item.angle.toDouble())
             .put("g", item.group)
+            .put("c", item.color)
             .put("r", JSONArray().also { arr -> item.replaced.forEach { arr.put(strokeToJson(it)) } })
     }
 
@@ -224,10 +229,11 @@ object HandwritingStore {
                 size = obj.getDouble("z").toFloat(),
                 angle = obj.optDouble("a", 0.0).toFloat(),
                 replaced = (0 until replaced.length()).map { strokeFromJson(replaced.getJSONArray(it)) },
-                group = obj.optInt("g", 0)
+                group = obj.optInt("g", 0),
+                color = obj.optInt("c", 0)
             )
         } else {
-            InkItem(strokeFromJson(obj.getJSONArray("p")), obj.optInt("g", 0))
+            InkItem(strokeFromJson(obj.getJSONArray("p")), obj.optInt("g", 0), obj.optInt("c", 0))
         }
 
     private fun strokeToJson(stroke: HwStroke): JSONArray {
@@ -254,7 +260,7 @@ object ItemTransform {
         fun stroke(s: HwStroke) = HwStroke(s.points.map { InkPt(it.x, it.y + dy, it.t + dt) })
         return items.map { item ->
             when (item) {
-                is InkItem -> InkItem(stroke(item.stroke), group)
+                is InkItem -> InkItem(stroke(item.stroke), group, item.color)
                 is WordItem -> item.copy(y = item.y + dy, replaced = item.replaced.map { stroke(it) }, group = group)
             }
         }
@@ -273,4 +279,75 @@ object ItemTransform {
             is WordItem -> item.replaced.lastOrNull()?.points?.last()?.t ?: 0L
         }
     } ?: 0L
+}
+
+/** Moving items, and finding which ones a touch or a box lands on (all in page widths). */
+object ItemGeometry {
+    /** One item moved by ([dx], [dy]) page widths; its group and colour stay. */
+    fun translated(item: PageItem, dx: Float, dy: Float): PageItem {
+        fun stroke(s: HwStroke) = HwStroke(s.points.map { InkPt(it.x + dx, it.y + dy, it.t) })
+        return when (item) {
+            is InkItem -> item.copy(stroke = stroke(item.stroke))
+            is WordItem -> item.copy(x = item.x + dx, y = item.y + dy, replaced = item.replaced.map { stroke(it) })
+        }
+    }
+
+    /** left, top, right, bottom of the item. A word is a tilted rectangle; this is the box round it. */
+    fun bounds(item: PageItem): FloatArray = when (item) {
+        is InkItem -> floatArrayOf(item.stroke.minX, item.stroke.minY, item.stroke.maxX, item.stroke.maxY)
+        is WordItem -> {
+            val c = kotlin.math.cos(item.angle)
+            val s = kotlin.math.sin(item.angle)
+            val w = item.width
+            val up = item.size * 0.9f
+            val down = item.size * 0.35f
+            val xs = FloatArray(4)
+            val ys = FloatArray(4)
+            val corners = arrayOf(0f to -up, w to -up, w to down, 0f to down)
+            corners.forEachIndexed { i, (lx, ly) ->
+                xs[i] = item.x + lx * c - ly * s
+                ys[i] = item.y + lx * s + ly * c
+            }
+            floatArrayOf(xs.min(), ys.min(), xs.max(), ys.max())
+        }
+    }
+
+    /** True when the point ([x], [y]) is on the item, within [tol]. */
+    fun hit(item: PageItem, x: Float, y: Float, tol: Float): Boolean = when (item) {
+        is InkItem -> {
+            val pts = item.stroke.points
+            if (pts.size == 1) {
+                dist(x, y, pts[0].x, pts[0].y, pts[0].x, pts[0].y) <= tol
+            } else {
+                (0 until pts.size - 1).any { i -> dist(x, y, pts[i].x, pts[i].y, pts[i + 1].x, pts[i + 1].y) <= tol }
+            }
+        }
+        is WordItem -> {
+            // Into the word's own frame: origin at its start, x along the text.
+            val c = kotlin.math.cos(item.angle)
+            val s = kotlin.math.sin(item.angle)
+            val dx = x - item.x
+            val dy = y - item.y
+            val lx = dx * c + dy * s
+            val ly = -dx * s + dy * c
+            lx >= -tol && lx <= item.width + tol && ly >= -item.size * 0.9f - tol && ly <= item.size * 0.35f + tol
+        }
+    }
+
+    /** True when the item's box overlaps the rectangle. */
+    fun intersects(item: PageItem, left: Float, top: Float, right: Float, bottom: Float): Boolean {
+        val b = bounds(item)
+        return b[0] <= right && b[2] >= left && b[1] <= bottom && b[3] >= top
+    }
+
+    /** Distance from a point to the segment (ax, ay)-(bx, by). */
+    private fun dist(px: Float, py: Float, ax: Float, ay: Float, bx: Float, by: Float): Float {
+        val vx = bx - ax
+        val vy = by - ay
+        val len2 = vx * vx + vy * vy
+        val t = if (len2 == 0f) 0f else (((px - ax) * vx + (py - ay) * vy) / len2).coerceIn(0f, 1f)
+        val cx = ax + t * vx
+        val cy = ay + t * vy
+        return kotlin.math.sqrt((px - cx) * (px - cx) + (py - cy) * (py - cy))
+    }
 }

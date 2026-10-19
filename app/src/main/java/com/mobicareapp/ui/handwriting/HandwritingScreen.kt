@@ -1,6 +1,16 @@
 package com.mobicareapp.ui.handwriting
 
 import android.content.ClipData
+import com.mobicareapp.handwriting.ItemGeometry
+import com.mobicareapp.handwriting.HandwritingStyle
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.OpenWith
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.border
+import android.content.Intent
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.CloudUpload
 import com.mobicareapp.handwriting.SavedTexts
@@ -90,6 +100,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -253,6 +264,10 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
     val currentNoteId by viewModel.currentNoteId.collectAsState()
     val importStatus by viewModel.importStatus.collectAsState()
     val pageRatio by viewModel.pageRatioFlow.collectAsState()
+    val inkColor by viewModel.inkColor.collectAsState()
+    val textColor by viewModel.textColor.collectAsState()
+    val normalFont by viewModel.normalFont.collectAsState()
+    val itemClipboard by viewModel.itemClipboard.collectAsState()
 
     // The notepad is saved to disk, but locking would still swap this screen out mid-sentence.
     DisposableEffect(Unit) {
@@ -294,6 +309,10 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
     var showVoicePicker by remember { mutableStateOf(false) }
     var showSaveSnippet by remember { mutableStateOf(false) }
     var showInsertSnippet by remember { mutableStateOf(false) }
+    // Move mode: pick writing (tap it, or drag a box round it), drag it, cut it, paste it on any screen.
+    var moveMode by remember { mutableStateOf(false) }
+    var selected by remember { mutableStateOf<Set<Int>>(emptySet()) }
+    var showStyle by remember { mutableStateOf(false) }
 
     // A photo from the gallery goes in behind the writing, fitted to the whole pad.
     val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(20)) { uris ->
@@ -366,11 +385,16 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
             ).show()
             return
         }
+        // Blank screens are never uploaded; with nothing but blank screens, nothing is sent at all.
+        if (!viewModel.hasContent()) {
+            uploadMessage = "Nothing to upload: every screen is blank."
+            return
+        }
         Toast.makeText(context, "Uploading all pages…", Toast.LENGTH_SHORT).show()
         scope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
-                    val bitmap = viewModel.renderAllPages()
+                    val bitmap = viewModel.renderAllPages(skipBlank = true)
                     val file = File(context.cacheDir, "handwriting_upload.jpg")
                     try {
                         FileOutputStream(file).use { out -> bitmap.compress(Bitmap.CompressFormat.JPEG, 92, out) }
@@ -390,6 +414,42 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
                     uploadMessage = message
                 }
                 .onFailure { e -> uploadMessage = "Upload failed: ${e.message ?: "unknown error"}" }
+        }
+    }
+
+    // Sends this screen (or all of them, as one tall picture) to any app: WhatsApp, mail, a gallery...
+    fun sharePictures(all: Boolean) {
+        val at = viewModel.pageIndex.value
+        if (all && !viewModel.hasContent() || !all && pages.getOrNull(at)?.let { it.items.isEmpty() && it.imagePath == null } != false) {
+            Toast.makeText(context, "Nothing to share: this screen is blank.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val bitmap = if (all) viewModel.renderAllPages(skipBlank = true) else viewModel.renderPage(at)
+                    val dir = File(context.getExternalFilesDir(null), "HandwritingShare").apply { mkdirs() }
+                    val file = File(dir, (if (all) "pages" else "page_${at + 1}") + "_${System.currentTimeMillis()}.png")
+                    try {
+                        FileOutputStream(file).use { out -> bitmap.compress(Bitmap.CompressFormat.PNG, 100, out) }
+                    } finally {
+                        bitmap.recycle()
+                    }
+                    file
+                }
+            }
+            result
+                .onSuccess { file ->
+                    val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+                    val send = Intent(Intent.ACTION_SEND).apply {
+                        type = "image/png"
+                        putExtra(Intent.EXTRA_STREAM, uri)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    AppLockManager.suppressNextLock()
+                    context.startActivity(Intent.createChooser(send, if (all) "Share all pages" else "Share this page"))
+                }
+                .onFailure { e -> Toast.makeText(context, e.message ?: "Couldn't share", Toast.LENGTH_LONG).show() }
         }
     }
 
@@ -432,7 +492,7 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
     }
     // Nudge towards "Next page" once writing reaches the bottom edge.
     val pageFull = page.lowestY > pageRatio * 0.9f
-    LaunchedEffect(index) { zoom = 1f; pan = Offset.Zero }
+    LaunchedEffect(index) { zoom = 1f; pan = Offset.Zero; selected = emptySet() }
 
     uploadMessage?.let { message ->
         AlertDialog(
@@ -480,6 +540,31 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
                 }) { Text("Copy") }
             },
             dismissButton = { TextButton(onClick = { ocrText = null }) { Text("Close") } }
+        )
+    }
+    if (showStyle) {
+        AlertDialog(
+            onDismissRequest = { showStyle = false },
+            title = { Text("Pen & text style") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.verticalScroll(rememberScrollState())) {
+                    Text("Pen colour (your handwriting)", style = MaterialTheme.typography.labelLarge)
+                    ColourRow(current = inkColor, onPick = { viewModel.setInkColor(it) })
+                    Text("Text colour (typed and transcribed text)", style = MaterialTheme.typography.labelLarge)
+                    ColourRow(current = textColor, onPick = { viewModel.setTextColor(it) })
+                    Text("Text font", style = MaterialTheme.typography.labelLarge)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(selected = !normalFont, onClick = { viewModel.setNormalFont(false) }, label = { Text("Handwriting style") })
+                        FilterChip(selected = normalFont, onClick = { viewModel.setNormalFont(true) }, label = { Text("Normal") })
+                    }
+                    Text(
+                        "New writing and text use these colours; what is already on the pages keeps its colour. The font applies to all the text on the pages.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = { TextButton(onClick = { showStyle = false }) { Text("Done") } }
         )
     }
     if (showTypeText) {
@@ -579,10 +664,10 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
             IconButton(onClick = onBack, modifier = Modifier.size(40.dp)) { Icon(Icons.Default.ArrowBack, contentDescription = "Back") }
             Text("${index + 1} / ${pages.size}", style = MaterialTheme.typography.titleSmall, maxLines = 1)
             Spacer(Modifier.weight(1f))
-            IconButton(onClick = { viewModel.undo() }, enabled = page.items.isNotEmpty(), modifier = Modifier.size(40.dp)) {
+            IconButton(onClick = { selected = emptySet(); viewModel.undo() }, enabled = page.items.isNotEmpty(), modifier = Modifier.size(40.dp)) {
                 Icon(Icons.Default.Undo, contentDescription = "Undo")
             }
-            IconButton(onClick = { viewModel.redo() }, enabled = page.redo.isNotEmpty(), modifier = Modifier.size(40.dp)) {
+            IconButton(onClick = { selected = emptySet(); viewModel.redo() }, enabled = page.redo.isNotEmpty(), modifier = Modifier.size(40.dp)) {
                 Icon(Icons.Default.Redo, contentDescription = "Redo")
             }
             IconButton(onClick = { showTypeText = true }, modifier = Modifier.size(40.dp)) {
@@ -617,6 +702,22 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
                     DropdownMenuItem(
                         text = { Text("My saved notes (list)…") },
                         onClick = { menuOpen = false; onOverlay(HwOverlay.NotesList) }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Move, cut or paste writing (also to another screen)…") },
+                        onClick = { menuOpen = false; moveMode = true; selected = emptySet() }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Pen & text colours, text font…") },
+                        onClick = { menuOpen = false; showStyle = true }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Share this screen (picture)…") },
+                        onClick = { menuOpen = false; sharePictures(all = false) }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Share all screens (one picture)…") },
+                        onClick = { menuOpen = false; sharePictures(all = true) }
                     )
                     DropdownMenuItem(
                         text = { Text("Save this page's writing under a title…") },
@@ -812,6 +913,36 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
                     }
                 },
                 onStroke = { viewModel.addStroke(it) },
+                moveMode = moveMode,
+                selected = selected,
+                onPress = { x, y ->
+                    val items = page.items
+                    val tol = 0.025f
+                    if (selected.any { it in items.indices && ItemGeometry.hit(items[it], x, y, tol) }) {
+                        true
+                    } else {
+                        val hit = items.indices.lastOrNull { ItemGeometry.hit(items[it], x, y, tol) }
+                        if (hit == null) {
+                            false
+                        } else {
+                            // Writing put on the page together (typed text, a pasted piece) is picked as one.
+                            val group = items[hit].group
+                            selected = if (group != 0) items.indices.filter { items[it].group == group }.toSet() else setOf(hit)
+                            true
+                        }
+                    }
+                },
+                onMoveEnd = { dx, dy -> viewModel.moveItems(selected, dx, dy) },
+                onArea = { left, top, right, bottom ->
+                    val items = page.items
+                    selected = if (right - left < 0.01f && bottom - top < 0.01f) {
+                        emptySet()
+                    } else {
+                        items.indices.filter { ItemGeometry.intersects(items[it], left, top, right, bottom) }.toSet()
+                    }
+                },
+                inkColor = inkColor,
+                normalFont = normalFont,
                 modifier = Modifier.fillMaxSize()
             )
 
@@ -844,6 +975,38 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
                     Icon(Icons.Default.ZoomIn, contentDescription = "Zoom in")
                 }
             }
+            }
+
+            if (moveMode) {
+                Card(
+                    modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(8.dp),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
+                ) {
+                    Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) {
+                        Text(
+                            if (selected.isEmpty()) "Tap writing to pick it, or drag a box round it. Then drag it to move it. To put it on another screen: Cut, go to that screen, Paste."
+                            else "${selected.size} piece(s) picked. Drag one to move them all.",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
+                            TextButton(enabled = selected.isNotEmpty(), onClick = { viewModel.cutItems(selected); selected = emptySet() }) { Text("Cut") }
+                            TextButton(
+                                enabled = selected.isNotEmpty(),
+                                onClick = { viewModel.copyItems(selected); Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show() }
+                            ) { Text("Copy") }
+                            TextButton(
+                                enabled = itemClipboard.isNotEmpty(),
+                                onClick = {
+                                    val before = page.items.size
+                                    val added = viewModel.pasteItems()
+                                    selected = (before until before + added).toSet()
+                                }
+                            ) { Text("Paste") }
+                            Spacer(Modifier.weight(1f))
+                            TextButton(onClick = { moveMode = false; selected = emptySet() }) { Text("Done") }
+                        }
+                    }
+                }
             }
 
             readError?.let { message ->
@@ -1549,12 +1712,25 @@ private fun HandwritingCanvas(
     selecting: Boolean,
     onSelect: (Offset, Offset, IntSize) -> Unit,
     onStroke: (HwStroke) -> Unit,
+    moveMode: Boolean,
+    selected: Set<Int>,
+    onPress: (Float, Float) -> Boolean,
+    onMoveEnd: (Float, Float) -> Unit,
+    onArea: (Float, Float, Float, Float) -> Unit,
+    inkColor: Int,
+    normalFont: Boolean,
     modifier: Modifier = Modifier
 ) {
     // The stroke being drawn, and the box being dragged while choosing an area to read (page coordinates).
     var live by remember { mutableStateOf<List<Offset>>(emptyList()) }
     var box by remember { mutableStateOf<Pair<Offset, Offset>?>(null) }
     val selectingNow by rememberUpdatedState(selecting)
+    // How far the picked writing has been dragged so far, in page widths (it is only saved when the finger lifts).
+    var dragOffset by remember { mutableStateOf(Offset.Zero) }
+    val moveModeNow by rememberUpdatedState(moveMode)
+    val onPressNow by rememberUpdatedState(onPress)
+    val onMoveEndNow by rememberUpdatedState(onMoveEnd)
+    val onAreaNow by rememberUpdatedState(onArea)
     val zoomNow by rememberUpdatedState(zoom)
     val panNow by rememberUpdatedState(pan)
     val ratioNow by rememberUpdatedState(pageRatio)
@@ -1593,6 +1769,62 @@ private fun HandwritingCanvas(
                         return@awaitEachGesture
                     }
 
+                    if (moveModeNow) {
+                        val start = pagePoint(down.position)
+                        down.consume()
+                        var twoFingersDown = false
+                        if (onPressNow(start.x / width, start.y / width)) {
+                            // On picked writing: drag it. A second finger cancels the drag and zooms instead.
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                if (event.changes.count { it.pressed } >= 2) {
+                                    twoFingersDown = true
+                                    event.changes.forEach { it.consume() }
+                                    break
+                                }
+                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                if (!change.pressed) {
+                                    change.consume()
+                                    break
+                                }
+                                val now = pagePoint(change.position)
+                                dragOffset = Offset((now.x - start.x) / width, (now.y - start.y) / width)
+                                change.consume()
+                            }
+                            val moved = dragOffset
+                            dragOffset = Offset.Zero
+                            if (twoFingersDown) {
+                                zoomMoveLoop(zoomNow, panNow, width, pageHeight, onTransform)
+                            } else if (kotlin.math.abs(moved.x) > 0.002f || kotlin.math.abs(moved.y) > 0.002f) {
+                                onMoveEndNow(moved.x, moved.y)
+                            }
+                        } else {
+                            // On empty paper: drag a box round writing to pick it (a plain tap picks nothing).
+                            var end = start
+                            box = start to end
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                if (event.changes.count { it.pressed } >= 2) {
+                                    twoFingersDown = true
+                                    event.changes.forEach { it.consume() }
+                                    break
+                                }
+                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                end = pagePoint(change.position)
+                                box = start to end
+                                change.consume()
+                                if (!change.pressed) break
+                            }
+                            box = null
+                            if (twoFingersDown) {
+                                zoomMoveLoop(zoomNow, panNow, width, pageHeight, onTransform)
+                            } else {
+                                onAreaNow(minOf(start.x, end.x) / width, minOf(start.y, end.y) / width, maxOf(start.x, end.x) / width, maxOf(start.y, end.y) / width)
+                            }
+                        }
+                        return@awaitEachGesture
+                    }
+
                     val first = pagePoint(down.position)
                     val points = mutableListOf(InkPt(first.x / width, first.y / width, down.uptimeMillis))
                     live = listOf(first)
@@ -1621,27 +1853,8 @@ private fun HandwritingCanvas(
                     live = emptyList()
 
                     if (twoFingers) {
-                        // Zooming/moving: the stroke that had started is dropped. The point of the page under the
-                        // fingers stays under them while zooming, and the fingers' own movement pans the page.
-                        var z = zoomNow
-                        var p = panNow
-                        while (true) {
-                            val event = awaitPointerEvent()
-                            if (event.changes.none { it.pressed }) break
-                            if (event.changes.count { it.pressed } >= 2) {
-                                val zoomChange = event.calculateZoom()
-                                val panChange = event.calculatePan()
-                                val centroid = event.calculateCentroid(useCurrent = true)
-                                if (centroid.isSpecified) {
-                                    val newZoom = (z * zoomChange).coerceIn(1f, MAX_ZOOM)
-                                    val pagePointUnderFingers = ((centroid - panChange) + p) / z
-                                    p = clampPan(pagePointUnderFingers * newZoom - centroid, newZoom, width, pageHeight, size.height.toFloat())
-                                    z = newZoom
-                                    onTransform(z, p)
-                                }
-                            }
-                            event.changes.forEach { it.consume() }
-                        }
+                        // Zooming/moving: the stroke that had started is dropped.
+                        zoomMoveLoop(zoomNow, panNow, width, pageHeight, onTransform)
                         return@awaitEachGesture
                     }
 
@@ -1675,26 +1888,56 @@ private fun HandwritingCanvas(
             }
 
             val inkWidth = size.width * INK_WIDTH
-            items.forEach { item ->
-                when (item) {
-                    is InkItem -> drawInk(item.stroke.points.map { Offset(it.x * size.width, it.y * size.width) }, inkWidth)
-                    // A word completed from a suggestion, set in a handwriting-style font where the unfinished word was.
-                    is WordItem -> {
-                        val layout = textMeasurer.measure(
-                            item.text,
-                            TextStyle(fontSize = (item.size * size.width * 1.15f).toSp(), fontFamily = FontFamily.Cursive, color = InkColor)
-                        )
-                        // The word starts at its baseline's left end and runs at the same angle as the writing it replaced.
-                        withTransform({
-                            translate(item.x * size.width, item.y * size.width)
-                            rotate(Math.toDegrees(item.angle.toDouble()).toFloat(), Offset.Zero)
-                        }) {
-                            drawText(layout, topLeft = Offset(0f, -layout.firstBaseline))
+            val drag = Offset(dragOffset.x * size.width, dragOffset.y * size.width)
+            val liveColor = if (inkColor != 0) Color(inkColor) else InkColor
+            items.forEachIndexed { i, item ->
+                val moving = drag != Offset.Zero && i in selected
+                val color = if (item.color != 0) Color(item.color) else InkColor
+                withTransform({ if (moving) translate(drag.x, drag.y) }) {
+                    when (item) {
+                        is InkItem -> drawInk(item.stroke.points.map { Offset(it.x * size.width, it.y * size.width) }, inkWidth, color)
+                        // Text (a word completed from a suggestion, typed or transcribed text), in the chosen font.
+                        is WordItem -> {
+                            val layout = textMeasurer.measure(
+                                item.text,
+                                TextStyle(
+                                    fontSize = (item.size * size.width * (if (normalFont) 0.95f else 1.15f)).toSp(),
+                                    fontFamily = if (normalFont) FontFamily.SansSerif else FontFamily.Cursive,
+                                    color = color
+                                )
+                            )
+                            // The word starts at its baseline's left end and runs at the same angle as the writing it replaced.
+                            withTransform({
+                                translate(item.x * size.width, item.y * size.width)
+                                rotate(Math.toDegrees(item.angle.toDouble()).toFloat(), Offset.Zero)
+                            }) {
+                                drawText(layout, topLeft = Offset(0f, -layout.firstBaseline))
+                            }
                         }
                     }
                 }
             }
-            drawInk(live, inkWidth)
+            drawInk(live, inkWidth, liveColor)
+
+            // Picked writing: a dashed box round it (it follows the finger while it is dragged).
+            if (moveMode) {
+                val picked = selected.filter { it in items.indices }.map { ItemGeometry.bounds(items[it]) }
+                if (picked.isNotEmpty()) {
+                    val pad = size.width * 0.008f
+                    val left = picked.minOf { it[0] } * size.width + drag.x - pad
+                    val top = picked.minOf { it[1] } * size.width + drag.y - pad
+                    val right = picked.maxOf { it[2] } * size.width + drag.x + pad
+                    val bottom = picked.maxOf { it[3] } * size.width + drag.y + pad
+                    val boxSize = androidx.compose.ui.geometry.Size(right - left, bottom - top)
+                    drawRect(Color(0x221976D2), topLeft = Offset(left, top), size = boxSize)
+                    drawRect(
+                        Color(0xFF1976D2),
+                        topLeft = Offset(left, top),
+                        size = boxSize,
+                        style = Stroke(width = 3f / z, pathEffect = PathEffect.dashPathEffect(floatArrayOf(14f / z, 10f / z)))
+                    )
+                }
+            }
 
             box?.let { (a, b) ->
                 val topLeft = Offset(minOf(a.x, b.x), minOf(a.y, b.y))
@@ -1719,6 +1962,53 @@ private fun HandwritingCanvas(
     }
 }
 
+/** Two fingers: the point of the page under them stays under them while zooming, and their movement pans the page. */
+private suspend fun androidx.compose.ui.input.pointer.AwaitPointerEventScope.zoomMoveLoop(
+    startZoom: Float,
+    startPan: Offset,
+    width: Float,
+    pageHeight: Float,
+    onTransform: (Float, Offset) -> Unit
+) {
+    var z = startZoom
+    var p = startPan
+    while (true) {
+        val event = awaitPointerEvent()
+        if (event.changes.none { it.pressed }) break
+        if (event.changes.count { it.pressed } >= 2) {
+            val zoomChange = event.calculateZoom()
+            val panChange = event.calculatePan()
+            val centroid = event.calculateCentroid(useCurrent = true)
+            if (centroid.isSpecified) {
+                val newZoom = (z * zoomChange).coerceIn(1f, MAX_ZOOM)
+                val pagePointUnderFingers = ((centroid - panChange) + p) / z
+                p = clampPan(pagePointUnderFingers * newZoom - centroid, newZoom, width, pageHeight, size.height.toFloat())
+                z = newZoom
+                onTransform(z, p)
+            }
+        }
+        event.changes.forEach { it.consume() }
+    }
+}
+
+/** A row of colour dots to choose from; the current one has a thick ring. */
+@Composable
+private fun ColourRow(current: Int, onPick: (Int) -> Unit) {
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
+        HandwritingStyle.PALETTE.forEach { (name, value) ->
+            val chosen = current == value
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .background(if (value == 0) InkColor else Color(value))
+                    .border(if (chosen) 4.dp else 1.dp, if (chosen) MaterialTheme.colorScheme.primary else Color.Gray, CircleShape)
+                    .clickable(onClickLabel = name) { onPick(value) }
+            )
+        }
+    }
+}
+
 /** The most the page can be zoomed in. */
 internal const val MAX_ZOOM = 6f
 
@@ -1732,10 +2022,10 @@ internal fun clampPan(pan: Offset, zoom: Float, width: Float, pageHeight: Float,
 private const val TWO_FINGER_MS = 120L
 
 /** Draws a stroke as one smooth curve: each touch point becomes a control point and the curve passes through the midpoints between them, which rounds off the jitter of a finger. */
-private fun DrawScope.drawInk(points: List<Offset>, width: Float) {
+private fun DrawScope.drawInk(points: List<Offset>, width: Float, color: Color = InkColor) {
     if (points.isEmpty()) return
     if (points.size == 1) {
-        drawCircle(InkColor, radius = width / 2f, center = points[0])
+        drawCircle(color, radius = width / 2f, center = points[0])
         return
     }
     val path = Path().apply {
@@ -1747,7 +2037,7 @@ private fun DrawScope.drawInk(points: List<Offset>, width: Float) {
         }
         lineTo(points.last().x, points.last().y)
     }
-    drawPath(path, InkColor, style = Stroke(width = width, cap = StrokeCap.Round, join = StrokeJoin.Round))
+    drawPath(path, color, style = Stroke(width = width, cap = StrokeCap.Round, join = StrokeJoin.Round))
 }
 
 internal fun copyToClipboard(context: Context, text: String) {

@@ -23,6 +23,8 @@ import com.mobicareapp.handwriting.PageItem
 import com.mobicareapp.handwriting.SharedItem
 import com.mobicareapp.handwriting.WordItem
 import com.mobicareapp.handwriting.WordSuggester
+import com.mobicareapp.handwriting.HandwritingStyle
+import com.mobicareapp.handwriting.ItemGeometry
 import com.mobicareapp.textextract.PdfTextExtractor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -77,6 +79,26 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
      */
     private val _suggestionsStale = MutableStateFlow(false)
     val suggestionsStale: StateFlow<Boolean> = _suggestionsStale.asStateFlow()
+
+    private val _inkColor = MutableStateFlow(HandwritingStyle.inkColor(application))
+    /** The colour new handwriting strokes are drawn in (0 = the default dark blue). */
+    val inkColor: StateFlow<Int> = _inkColor.asStateFlow()
+
+    private val _textColor = MutableStateFlow(HandwritingStyle.textColor(application))
+    /** The colour typed and transcribed text is put on the page in. */
+    val textColor: StateFlow<Int> = _textColor.asStateFlow()
+
+    private val _normalFont = MutableStateFlow(HandwritingStyle.normalFont(application))
+    /** True: text is set in an ordinary font instead of the handwriting-style one. */
+    val normalFont: StateFlow<Boolean> = _normalFont.asStateFlow()
+
+    fun setInkColor(color: Int) { _inkColor.value = color; HandwritingStyle.setInkColor(context, color) }
+    fun setTextColor(color: Int) { _textColor.value = color; HandwritingStyle.setTextColor(context, color) }
+    fun setNormalFont(normal: Boolean) { _normalFont.value = normal; HandwritingStyle.setNormalFont(context, normal) }
+
+    private val _itemClipboard = MutableStateFlow<List<PageItem>>(emptyList())
+    /** Writing cut or copied from a screen, waiting to be pasted onto another (or the same) one. */
+    val itemClipboard: StateFlow<List<PageItem>> = _itemClipboard.asStateFlow()
 
     private val _snippets = MutableStateFlow(HandwritingStore.loadSnippets(application))
     /** Saved sentences/handwriting that can be inserted into any page (newest first). */
@@ -165,7 +187,7 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
 
     fun addStroke(stroke: HwStroke) {
         val index = _pageIndex.value
-        updatePage(index) { it.copy(items = it.items + InkItem(stroke), redo = emptyList()) }
+        updatePage(index) { it.copy(items = it.items + InkItem(stroke, 0, _inkColor.value), redo = emptyList()) }
         scheduleRecognition(index, RECOGNIZE_DELAY_MS)
         scheduleSuggestions(index)
     }
@@ -306,7 +328,9 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
         val letterSize = InkLayout.typicalSize(strokes.map { InkLayout.Element(InkItem(it)) })
         // Set the finished word about as big as the letters it replaces (within sensible limits).
         val size = (letterSize * 0.6f).coerceIn(WORD_SIZE_MIN, WORD_SIZE_MAX)
-        val replaced = WordItem(text = word, x = startX, y = startY, size = size, replaced = strokes, angle = angle)
+        // The finished word keeps the colour of the strokes it replaces.
+        val wordColor = page.items.takeLast(strokes.size).lastOrNull()?.color ?: _inkColor.value
+        val replaced = WordItem(text = word, x = startX, y = startY, size = size, replaced = strokes, angle = angle, color = wordColor)
         updatePage(index) { it.copy(items = it.items.dropLast(strokes.size) + replaced, redo = emptyList()) }
         clearSuggestions()
         scheduleRecognition(index, RECOGNIZE_DELAY_MS)
@@ -593,7 +617,7 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
         val group = (System.currentTimeMillis() % Int.MAX_VALUE).toInt().coerceAtLeast(1)
         fun itemsFor(chunk: List<List<Pair<String, Float>>>): List<PageItem> =
             chunk.flatMapIndexed { lineIndex, line ->
-                line.map { (word, wordX) -> WordItem(word, wordX, firstBaseline + lineIndex * lineHeight, size, emptyList(), 0f, group) }
+                line.map { (word, wordX) -> WordItem(word, wordX, firstBaseline + lineIndex * lineHeight, size, emptyList(), 0f, group, _textColor.value) }
             }
         fun textFor(chunk: List<List<Pair<String, Float>>>): String = chunk.joinToString(" ") { line -> line.joinToString(" ") { it.first } }
 
@@ -666,7 +690,7 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
         val group = (System.currentTimeMillis() % Int.MAX_VALUE).toInt().coerceAtLeast(1)
         fun itemsFor(chunk: List<List<Pair<String, Float>>>, baseline: Float): List<PageItem> =
             chunk.flatMapIndexed { lineIndex, line ->
-                line.map { (word, wordX) -> WordItem(word, wordX, baseline + lineIndex * lineHeight, size, emptyList(), 0f, group) }
+                line.map { (word, wordX) -> WordItem(word, wordX, baseline + lineIndex * lineHeight, size, emptyList(), 0f, group, _textColor.value) }
             }
         fun textFor(chunk: List<List<Pair<String, Float>>>): String = chunk.joinToString(" ") { line -> line.joinToString(" ") { it.first } }
 
@@ -864,7 +888,58 @@ class HandwritingViewModel(application: Application) : AndroidViewModel(applicat
     // --- download everything ---------------------------------------------------------------------
 
     /** Every page stacked top to bottom as one tall image, ready to save. Heavy: call off the main thread. */
-    fun renderAllPages(): Bitmap = HandwritingExport.renderAll(_pages.value, pageRatio)
+    /** [skipBlank]: leave out screens with no writing and no picture. */
+    fun renderAllPages(skipBlank: Boolean = false): Bitmap {
+        val pages = if (skipBlank) _pages.value.filterNot { it.items.isEmpty() && it.imagePath == null } else _pages.value
+        return HandwritingExport.renderAll(pages.ifEmpty { listOf(HwPage()) }, pageRatio, _normalFont.value)
+    }
+
+    /** One screen as a picture (for sharing). */
+    fun renderPage(index: Int): Bitmap = HandwritingExport.renderAll(listOf(_pages.value[index]), pageRatio, _normalFont.value)
+
+    /** False when every screen is blank (nothing written, no picture), so there is nothing worth uploading. */
+    fun hasContent(): Boolean = _pages.value.any { it.items.isNotEmpty() || it.imagePath != null }
+
+    // --- moving, cutting and pasting writing ---------------------------------------------------
+
+    /** Moves the items at [indices] on the current screen by ([dx], [dy]) page widths. They keep their place in the order, so Undo is not upset. */
+    fun moveItems(indices: Set<Int>, dx: Float, dy: Float) {
+        val index = _pageIndex.value
+        updatePage(index) { page ->
+            page.copy(items = page.items.mapIndexed { i, item -> if (i in indices) ItemGeometry.translated(item, dx, dy) else item })
+        }
+        scheduleRecognition(index, RECOGNIZE_DELAY_MS)
+    }
+
+    fun copyItems(indices: Set<Int>) {
+        val items = _pages.value.getOrNull(_pageIndex.value)?.items ?: return
+        _itemClipboard.value = items.filterIndexed { i, _ -> i in indices }
+    }
+
+    /** Takes the items at [indices] off this screen and keeps them to paste elsewhere. */
+    fun cutItems(indices: Set<Int>) {
+        copyItems(indices)
+        val index = _pageIndex.value
+        updatePage(index) { page -> page.copy(items = page.items.filterIndexed { i, _ -> i !in indices }, redo = emptyList()) }
+        clearSuggestions()
+        scheduleRecognition(index, RECOGNIZE_DELAY_MS)
+    }
+
+    /** Puts what was cut or copied onto the current screen, where it was; returns how many items went in. */
+    fun pasteItems(): Int {
+        val clip = _itemClipboard.value
+        if (clip.isEmpty()) return 0
+        val index = _pageIndex.value
+        val page = _pages.value.getOrNull(index) ?: return 0
+        // Moved on in time too, so the reading sees it as written after what is already here.
+        val timeShift = if (page.items.isEmpty()) 0L else ItemTransform.lastTime(page.items) + 1000L - ItemTransform.firstTime(clip)
+        val group = (System.currentTimeMillis() % Int.MAX_VALUE).toInt().coerceAtLeast(1)
+        val placed = ItemTransform.shifted(clip, 0f, timeShift, group)
+        updatePage(index) { it.copy(items = it.items + placed, redo = emptyList()) }
+        clearSuggestions()
+        scheduleRecognition(index, RECOGNIZE_DELAY_MS)
+        return placed.size
+    }
 
     // --- text ------------------------------------------------------------------------------
 
