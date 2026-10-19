@@ -73,6 +73,8 @@ object AppLockManager {
                     mainHandler.removeCallbacks(clearSuppression)
                 } else {
                     _locked.value = true
+                    // Whenever the app is minimised and opened again, it comes back on the handwriting notepad.
+                    com.mobicareapp.handwriting.HandwritingStartup.markBackgrounded()
                 }
             }
         })

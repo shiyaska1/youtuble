@@ -95,7 +95,8 @@ class MainActivity : FragmentActivity() {
         handleQuickActionIntent(intent)
         handleShareIntent(intent)
         // A fresh launch (not a rotation/recreation, and not a record shortcut) opens the handwriting notepad for quick notes.
-        if (savedInstanceState == null && intent?.getStringExtra(EXTRA_QUICK_ACTION) == null &&
+        // Every start, even when Android restores the app after closing it in the background.
+        if (intent?.getStringExtra(EXTRA_QUICK_ACTION) == null &&
             intent?.action != Intent.ACTION_SEND && intent?.action != Intent.ACTION_SEND_MULTIPLE
         ) {
             HandwritingStartup.request()
@@ -104,6 +105,15 @@ class MainActivity : FragmentActivity() {
             YtSaverTheme {
                 AppRoot(this)
             }
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        // Coming back to the app after it was minimised: the handwriting notepad is the screen to land on
+        // (unless a record shortcut or something shared is what brought the app back).
+        if (HandwritingStartup.takeBackgrounded() && PendingQuickRecordAction.pending.value == null) {
+            HandwritingStartup.request()
         }
     }
 
@@ -237,7 +247,8 @@ private fun AppRoot(activity: FragmentActivity) {
     // being torn down and rebuilt when the player/browser destinations are pushed on top of it —
     // otherwise it always reset to tab 0 on the way back, regardless of which tab was open before
     // a video was opened.
-    var selectedTab by remember { mutableStateOf(0) }
+    // The notepad is the home screen: start on the tab that holds it, so no other screen flashes first.
+    var selectedTab by remember { mutableStateOf(if (HandwritingStartup.isRequested() && PendingQuickRecordAction.pending.value == null) 2 else 0) }
     // A shortcut tap (long-press the app icon → "Record Audio"/"Record Video") sets this before
     // this composition even starts — jump straight to the Record tab so RecordScreen's own
     // LaunchedEffect can see it and start recording immediately, no extra taps needed.

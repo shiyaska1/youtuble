@@ -130,7 +130,8 @@ fun ScanScreen() {
     var showImageMarkup by remember { mutableStateOf(false) }
     var showQuestionPaper by remember { mutableStateOf(false) }
     var showUploadLink by remember { mutableStateOf(false) }
-    var showHandwriting by remember { mutableStateOf(false) }
+    // Opens the notepad in the very first frame when the app was just started (no list showing first).
+    var showHandwriting by remember { mutableStateOf(HandwritingStartup.consume()) }
     // Launched from a fresh app start: open the handwriting notepad straight away (once).
     val handwritingRequests by HandwritingStartup.requestCount.collectAsState()
     LaunchedEffect(handwritingRequests) { if (HandwritingStartup.consume()) showHandwriting = true }

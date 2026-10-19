@@ -185,6 +185,9 @@ import com.mobicareapp.handwriting.InkPt
 import kotlinx.coroutines.launch
 
 private val PaperColor = Color(0xFFFFFDF6)
+
+/** Whether the "keep the old writing or start new" question was already dealt with since the app process started. */
+private var askedThisProcess = false
 private val InkColor = Color(0xFF14213D)
 
 private const val INK_WIDTH = 0.0048f
@@ -294,7 +297,10 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
     // (Not when something was just shared to the app: that goes onto the first free screen, and a
     // "New notepad" answer would wipe it.)
     val askAtStart = remember {
-        !SharedContentInbox.hasPending() && (pages.any { it.items.isNotEmpty() || it.imagePath != null } || pages.size > 1)
+        // Only once after the app is started: coming back to the notepad later never asks again.
+        val ask = !askedThisProcess && !SharedContentInbox.hasPending() && (pages.any { it.items.isNotEmpty() || it.imagePath != null } || pages.size > 1)
+        askedThisProcess = true
+        ask
     }
     val sharedVersion by SharedContentInbox.version.collectAsState()
     LaunchedEffect(sharedVersion) {

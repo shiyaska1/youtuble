@@ -23,6 +23,14 @@ object HandwritingStartup {
 
     fun isRequested(): Boolean = requested.get()
 
+    private val backgrounded = AtomicBoolean(false)
+
+    /** The app really left the front (not just a picker or the lock hold): coming back should land on the notepad. */
+    fun markBackgrounded() = backgrounded.set(true)
+
+    /** True once after such a departure. */
+    fun takeBackgrounded(): Boolean = backgrounded.getAndSet(false)
+
     /** True once, for whoever opens the notepad. */
     fun consume(): Boolean = requested.getAndSet(false)
 }
