@@ -1,6 +1,7 @@
 package com.mobicareapp.ui.handwriting
 
 import android.content.ClipData
+import androidx.compose.material.icons.filled.SaveAs
 import androidx.compose.ui.graphics.asAndroidBitmap
 import com.mobicareapp.handwriting.ItemGeometry
 import com.mobicareapp.handwriting.HandwritingStyle
@@ -1243,6 +1244,8 @@ fun TypeTextDialog(
     // --- saved texts (kept under a title for later) ---
     var showSave by remember { mutableStateOf(false) }
     var showSaved by remember { mutableStateOf(false) }
+    // The saved text that is open in the box: Save then updates it instead of asking for a name again.
+    var openedId by remember { mutableStateOf<Long?>(null) }
     // The plain (notes) version can add its text to 1.txt on the user's server.
     var serverStatus by remember { mutableStateOf<String?>(null) }
     var serverBusy by remember { mutableStateOf(false) }
@@ -1385,6 +1388,8 @@ fun TypeTextDialog(
             onSave = { title ->
                 showSave = false
                 savedTexts = store.add(context, title, text)
+                // The new copy is the one open now.
+                openedId = savedTexts.firstOrNull()?.id
                 Toast.makeText(context, "Saved as \"" + title.trim() + "\"", Toast.LENGTH_SHORT).show()
             },
             onDismiss = { showSave = false }
@@ -1393,11 +1398,22 @@ fun TypeTextDialog(
     if (showSaved) {
         SavedTextsDialog(
             items = savedTexts,
+            // Tapping one opens it in the box (what was there stays in Undo); Save then updates it.
             onUse = { chosen ->
+                showSaved = false
+                commitPending()
+                text = chosen.text
+                openedId = chosen.id
+            },
+            // Adds it to the end of what is in the box instead of opening it.
+            onAppend = { chosen ->
                 showSaved = false
                 text = if (text.isBlank()) chosen.text else text.trimEnd() + "\n" + chosen.text
             },
-            onDelete = { savedTexts = store.delete(context, it.id) },
+            onDelete = {
+                savedTexts = store.delete(context, it.id)
+                if (openedId == it.id) openedId = null
+            },
             onDismiss = { showSaved = false }
         )
     }
@@ -1434,20 +1450,40 @@ fun TypeTextDialog(
                             Toast.makeText(context, "Copied to the clipboard", Toast.LENGTH_SHORT).show()
                         }
                     ) { Icon(Icons.Default.ContentCopy, contentDescription = "Copy") }
+                    // Save: updates the saved text that is open; if none is open, asks for a title. Save as: always a new copy under a new title.
+                    IconButton(
+                        enabled = text.isNotBlank(),
+                        onClick = {
+                            val openId = openedId
+                            val openTitle = savedTexts.firstOrNull { it.id == openId }?.title
+                            if (openId != null && openTitle != null) {
+                                savedTexts = store.update(context, openId, text)
+                                Toast.makeText(context, "Updated \"$openTitle\"", Toast.LENGTH_SHORT).show()
+                            } else {
+                                showSave = true
+                            }
+                        }
+                    ) {
+                        Icon(Icons.Default.Save, contentDescription = "Save (updates the open saved text)")
+                    }
                     IconButton(enabled = text.isNotBlank(), onClick = { showSave = true }) {
-                        Icon(Icons.Default.Save, contentDescription = "Save with a title")
+                        Icon(Icons.Default.SaveAs, contentDescription = "Save as a new copy")
                     }
                     IconButton(onClick = { showSaved = true }) {
                         Icon(Icons.Default.Bookmarks, contentDescription = "Saved texts")
                     }
                     // Empties the box in one tap (Undo brings it back).
-                    TextButton(enabled = text.isNotBlank(), onClick = { commitPending(); text = "" }) {
+                    TextButton(enabled = text.isNotBlank(), onClick = { commitPending(); text = ""; openedId = null }) {
                         Text("Clear", style = MaterialTheme.typography.titleMedium)
                     }
                     Spacer(Modifier.weight(1f))
-                    if (savedTexts.isNotEmpty()) {
-                        Text("${savedTexts.size} saved", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
+                }
+                savedTexts.firstOrNull { it.id == openedId }?.let { open ->
+                    Text(
+                        "Open: \"${open.title}\". Save updates it; Save as makes a new copy.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
                 }
 
                 // Notes only: add the text to the end of 1.txt on the server, clear that file, or copy its address.
@@ -1613,6 +1649,7 @@ fun TypeTextDialog(
 private fun SavedTextsDialog(
     items: List<SavedText>,
     onUse: (SavedText) -> Unit,
+    onAppend: (SavedText) -> Unit,
     onDelete: (SavedText) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -1635,7 +1672,7 @@ private fun SavedTextsDialog(
         title = { Text("Saved texts") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Tap one to put it in the text box.", style = MaterialTheme.typography.bodySmall)
+                Text("Tap one to open it in the text box (Save then updates it). \"Add\" puts it at the end of what is already there.", style = MaterialTheme.typography.bodySmall)
                 OutlinedTextField(
                     value = query,
                     onValueChange = { query = it },
@@ -1664,6 +1701,7 @@ private fun SavedTextsDialog(
                                         overflow = TextOverflow.Ellipsis
                                     )
                                 }
+                                TextButton(onClick = { onAppend(item) }) { Text("Add") }
                                 IconButton(onClick = { pendingDelete = item }) {
                                     Icon(Icons.Default.Delete, contentDescription = "Delete")
                                 }

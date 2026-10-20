@@ -37,6 +37,13 @@ class SavedTextStore(private val fileName: String) {
         return updated
     }
 
+    /** Replaces the text of the saved text [id] (its title stays); returns the updated list. */
+    fun update(context: Context, id: Long, text: String): List<SavedText> {
+        val updated = load(context).map { if (it.id == id) it.copy(text = text) else it }
+        store(context, updated)
+        return updated
+    }
+
     fun delete(context: Context, id: Long): List<SavedText> {
         val updated = load(context).filterNot { it.id == id }
         store(context, updated)
