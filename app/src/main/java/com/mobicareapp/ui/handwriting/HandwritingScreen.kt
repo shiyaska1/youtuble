@@ -1,6 +1,7 @@
 package com.mobicareapp.ui.handwriting
 
 import android.content.ClipData
+import androidx.compose.ui.graphics.asAndroidBitmap
 import com.mobicareapp.handwriting.ItemGeometry
 import com.mobicareapp.handwriting.HandwritingStyle
 import com.mobicareapp.handwriting.TypedDraft
@@ -906,7 +907,7 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
                     } else {
                         scope.launch {
                             ocrBusy = true
-                            val result = runCatching { readTextInArea(context, path, from, to, canvas, picture.width, picture.height) }
+                            val result = runCatching { readTextInArea(context, path, picture.asAndroidBitmap(), from, to, canvas, picture.width, picture.height) }
                             ocrBusy = false
                             result
                                 .onSuccess { text ->
@@ -1137,6 +1138,7 @@ private fun HandwritingContent(onBack: () -> Unit, overlay: HwOverlay, onOverlay
 private suspend fun readTextInArea(
     context: Context,
     imagePath: String,
+    loaded: Bitmap?,
     from: Offset,
     to: Offset,
     pad: IntSize,
@@ -1154,8 +1156,17 @@ private suspend fun readTextInArea(
     val bottom = maxOf(y(from.y), y(to.y))
     if (right - left < 12f || bottom - top < 12f) error("Drag a bigger area over the text")
 
-    val bitmap = withContext(Dispatchers.IO) { BitmapFactory.decodeFile(imagePath) } ?: error("Couldn't open the picture")
-    val cropped = PdfTextExtractor.crop(bitmap, left / imageWidth, top / imageHeight, right / imageWidth, bottom / imageHeight)
+    // The picture that is already showing on the pad is used; the file is only read when that is not available.
+    val bitmap = loaded ?: withContext(Dispatchers.IO) { BitmapFactory.decodeFile(imagePath) } ?: error("Couldn't open the picture")
+    val region = PdfTextExtractor.crop(bitmap, left / imageWidth, top / imageHeight, right / imageWidth, bottom / imageHeight)
+    // A small area (a line of text) is enlarged first: the reader does much better on bigger letters.
+    val longSide = maxOf(region.width, region.height)
+    val cropped = if (longSide in 1..1599) {
+        val factor = minOf(4f, 1600f / longSide)
+        Bitmap.createScaledBitmap(region, (region.width * factor).toInt(), (region.height * factor).toInt(), true)
+    } else {
+        region
+    }
     val extraction = PdfTextExtractor.extractText(context, cropped)
     return extraction.paragraphsFor(extraction.detected).joinToString("\n").trim()
 }
@@ -1212,7 +1223,6 @@ fun TypeTextDialog(
     }
 
     // --- draft: the text is kept as it is typed, so a crash, a swipe-away or closing the app loses nothing ---
-    var inserted by remember { mutableStateOf(false) }
     val textNow by rememberUpdatedState(text)
     LaunchedEffect(text) {
         if (!simple) {
@@ -1222,7 +1232,7 @@ fun TypeTextDialog(
     }
     DisposableEffect(Unit) {
         if (!simple) TypedDraft.setOpen(context, true)
-        onDispose { if (!simple && !inserted) TypedDraft.setText(context, textNow) }
+        onDispose { if (!simple) TypedDraft.setText(context, textNow) }
     }
     // Closing it on purpose: the text stays saved, but the window will not pop up by itself next time.
     val closeDialog = {
@@ -1584,8 +1594,9 @@ fun TypeTextDialog(
                     if (!simple) TextButton(
                         enabled = text.isNotBlank() && !recordingHere,
                         onClick = {
-                            inserted = true
-                            TypedDraft.clear(context)
+                            // The text stays in the box (and saved) after Insert: only the Clear button empties it.
+                            TypedDraft.setText(context, text)
+                            TypedDraft.setOpen(context, false)
                             onInsert(text, size)
                         }
                     ) {
