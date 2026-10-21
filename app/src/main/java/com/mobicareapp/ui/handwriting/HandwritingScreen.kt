@@ -1194,7 +1194,8 @@ fun TypeTextDialog(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     // Typed text not yet on the page is kept (see TypedDraft), so it is back if the app was closed.
-    var text by remember { mutableStateOf(initialText.ifEmpty { if (simple) "" else TypedDraft.text(context) }) }
+    // The notes version opens exactly as it was left (the same saved text open, with what was typed); the first time it uses [initialText].
+    var text by remember { mutableStateOf(if (simple) (store.sessionText(context) ?: initialText) else initialText.ifEmpty { TypedDraft.text(context) }) }
     var size by remember { mutableStateOf(0.075f) }
     val focus = remember { androidx.compose.ui.focus.FocusRequester() }
     LaunchedEffect(Unit) { runCatching { focus.requestFocus() } } // opens the keyboard straight away
@@ -1245,7 +1246,20 @@ fun TypeTextDialog(
     var showSave by remember { mutableStateOf(false) }
     var showSaved by remember { mutableStateOf(false) }
     // The saved text that is open in the box: Save then updates it instead of asking for a name again.
-    var openedId by remember { mutableStateOf<Long?>(null) }
+    var openedId by remember {
+        mutableStateOf<Long?>(if (simple) store.sessionOpenedId(context)?.takeIf { id -> store.load(context).any { it.id == id } } else null)
+    }
+    // Notes: remember the box and the open saved text, so reopening continues where it was left (no searching and inserting again).
+    val openedNow by rememberUpdatedState(openedId)
+    LaunchedEffect(text, openedId) {
+        if (simple) {
+            delay(150)
+            store.saveSession(context, text, openedId)
+        }
+    }
+    DisposableEffect(Unit) {
+        onDispose { if (simple) store.saveSession(context, textNow, openedNow) }
+    }
     // The plain (notes) version can add its text to 1.txt on the user's server.
     var serverStatus by remember { mutableStateOf<String?>(null) }
     var serverBusy by remember { mutableStateOf(false) }

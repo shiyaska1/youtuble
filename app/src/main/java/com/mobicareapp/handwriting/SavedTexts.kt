@@ -37,6 +37,20 @@ class SavedTextStore(private val fileName: String) {
         return updated
     }
 
+    // --- where the user left off: the text in the box and which saved text was open, so it is there again next time ---
+
+    private fun sessionPrefs(context: Context) = context.getSharedPreferences("saved_text_sessions", Context.MODE_PRIVATE)
+
+    /** What was in the box when the window was last used (null if it never was). */
+    fun sessionText(context: Context): String? = sessionPrefs(context).getString("$fileName.text", null)
+
+    /** The saved text that was open then (null if none). */
+    fun sessionOpenedId(context: Context): Long? = sessionPrefs(context).getLong("$fileName.id", -1L).takeIf { it >= 0 }
+
+    fun saveSession(context: Context, text: String, openedId: Long?) {
+        sessionPrefs(context).edit().putString("$fileName.text", text).putLong("$fileName.id", openedId ?: -1L).commit()
+    }
+
     /** Replaces the text of the saved text [id] (its title stays); returns the updated list. */
     fun update(context: Context, id: Long, text: String): List<SavedText> {
         val updated = load(context).map { if (it.id == id) it.copy(text = text) else it }
