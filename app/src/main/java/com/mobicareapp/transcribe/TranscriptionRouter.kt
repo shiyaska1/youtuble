@@ -20,6 +20,7 @@ object TranscriptionRouter {
             TranscribeSettings.Engine.GROQ -> TranscribeSettings.getGroqKey(context) != null
             TranscribeSettings.Engine.SARVAM -> TranscribeSettings.getSarvamKey(context) != null
             TranscribeSettings.Engine.ASSEMBLYAI -> TranscribeSettings.getApiKey(context) != null
+            else -> TranscribeSettings.keyFor(context, engine) != null
         }
         if (hasKey) return null
         val name = when (engine) {
@@ -27,13 +28,15 @@ object TranscriptionRouter {
             TranscribeSettings.Engine.GROQ -> "Groq"
             TranscribeSettings.Engine.SARVAM -> "Sarvam"
             TranscribeSettings.Engine.ASSEMBLYAI -> "AssemblyAI"
+            else -> TranscribeSettings.engineName(engine)
         }
         return "Set up your $name API key first: open Library, tap ⋮ on a recording, choose Transcribe, and pick $name there."
     }
 
     suspend fun transcribe(context: Context, file: File, languageCode: String?, onStatus: (String) -> Unit): Result<String> {
         missingKeyMessage(context)?.let { return Result.failure(IllegalStateException(it)) }
-        return when (TranscribeSettings.getEngine(context)) {
+        val chosen = TranscribeSettings.getEngine(context)
+        return when (chosen) {
             TranscribeSettings.Engine.GEMINI ->
                 GeminiTranscriber.transcribe(QuestionPaperSettings.getApiKey(context)!!, file, languageCode, onStatus, englishOnly = false)
             TranscribeSettings.Engine.GROQ ->
@@ -42,6 +45,8 @@ object TranscriptionRouter {
                 SarvamTranscriber.transcribe(TranscribeSettings.getSarvamKey(context)!!, file, context.cacheDir, languageCode, onStatus, englishOnly = false)
             TranscribeSettings.Engine.ASSEMBLYAI ->
                 AssemblyAiTranscriber.transcribe(TranscribeSettings.getApiKey(context)!!, file, languageCode, onStatus)
+            else ->
+                OtherTranscribers.transcribe(chosen, TranscribeSettings.keyFor(context, chosen)!!, file, languageCode, onStatus)
         }
     }
 }

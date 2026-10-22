@@ -42,6 +42,7 @@ object AutoTranscribeRunner {
             TranscribeSettings.Engine.GROQ -> TranscribeSettings.getGroqKey(appContext)
             TranscribeSettings.Engine.SARVAM -> TranscribeSettings.getSarvamKey(appContext)
             TranscribeSettings.Engine.ASSEMBLYAI -> TranscribeSettings.getApiKey(appContext)
+            else -> TranscribeSettings.keyFor(appContext, engine)
         }
         if (apiKey == null) {
             notify(appContext, "Recording saved. Set up an API key (Library → ⋮ → Transcribe) to auto-transcribe next time.")
@@ -55,6 +56,7 @@ object AutoTranscribeRunner {
                 TranscribeSettings.Engine.GROQ -> GroqTranscriber.transcribe(apiKey, audio, languageCode, {}, englishOnly)
                 TranscribeSettings.Engine.SARVAM -> SarvamTranscriber.transcribe(apiKey, audio, appContext.cacheDir, languageCode, {}, englishOnly)
                 TranscribeSettings.Engine.ASSEMBLYAI -> AssemblyAiTranscriber.transcribe(apiKey, audio, languageCode) {}
+                else -> OtherTranscribers.transcribe(engine, apiKey, audio, languageCode) {}
             }
             result.fold(
                 onSuccess = { text -> notify(appContext, if (text.isBlank()) "No speech recognized in that recording" else text) },

@@ -1293,6 +1293,7 @@ fun TypeTextDialog(
         TranscribeSettings.Engine.GROQ -> TranscribeSettings.getGroqKey(context)
         TranscribeSettings.Engine.SARVAM -> TranscribeSettings.getSarvamKey(context)
         TranscribeSettings.Engine.ASSEMBLYAI -> TranscribeSettings.getApiKey(context)
+        else -> TranscribeSettings.keyFor(context, e)
     }
     val hasKey = remember(engine, keyVersion) { keyFor(engine) != null }
 
@@ -1583,7 +1584,11 @@ fun TypeTextDialog(
                                     "Gemini" to TranscribeSettings.Engine.GEMINI,
                                     "Groq" to TranscribeSettings.Engine.GROQ,
                                     "Sarvam" to TranscribeSettings.Engine.SARVAM,
-                                    "AssemblyAI" to TranscribeSettings.Engine.ASSEMBLYAI
+                                    "AssemblyAI" to TranscribeSettings.Engine.ASSEMBLYAI,
+                                    "Deepgram" to TranscribeSettings.Engine.DEEPGRAM,
+                                    "Mistral" to TranscribeSettings.Engine.MISTRAL,
+                                    "Hugging Face" to TranscribeSettings.Engine.HUGGINGFACE,
+                                    "Cloudflare" to TranscribeSettings.Engine.CLOUDFLARE
                                 ).forEach { (label, value) ->
                                     FilterChip(
                                         selected = engine == value,
@@ -1594,11 +1599,14 @@ fun TypeTextDialog(
                             }
                             // The chosen engine has no key yet: ask for it right here.
                             if (!hasKey) {
+                                if (TranscribeSettings.isExtra(engine)) {
+                                    Text(TranscribeSettings.engineHelp(engine), style = MaterialTheme.typography.bodySmall)
+                                }
                                 OutlinedTextField(
                                     value = keyInput,
                                     onValueChange = { keyInput = it },
                                     singleLine = true,
-                                    label = { Text("API key for this engine") },
+                                    label = { Text(TranscribeSettings.engineKeyLabel(engine)) },
                                     modifier = Modifier.fillMaxWidth()
                                 )
                                 TextButton(
@@ -1609,6 +1617,7 @@ fun TypeTextDialog(
                                             TranscribeSettings.Engine.GROQ -> TranscribeSettings.setGroqKey(context, keyInput)
                                             TranscribeSettings.Engine.SARVAM -> TranscribeSettings.setSarvamKey(context, keyInput)
                                             TranscribeSettings.Engine.ASSEMBLYAI -> TranscribeSettings.setApiKey(context, keyInput)
+                                            else -> TranscribeSettings.setKeyFor(context, engine, keyInput)
                                         }
                                         keyInput = ""
                                         keyVersion++

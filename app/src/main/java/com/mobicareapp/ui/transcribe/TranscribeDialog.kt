@@ -75,6 +75,7 @@ import com.mobicareapp.questionpaper.QuestionPaperSettings
 import com.mobicareapp.transcribe.AssemblyAiTranscriber
 import com.mobicareapp.transcribe.GeminiTranscriber
 import com.mobicareapp.transcribe.GroqTranscriber
+import com.mobicareapp.transcribe.OtherTranscribers
 import com.mobicareapp.transcribe.SarvamTranscriber
 import com.mobicareapp.transcribe.SpellChecker
 import com.mobicareapp.transcribe.TranscribeSettings
@@ -94,6 +95,7 @@ private sealed class TranscribeState {
     data object NeedsGeminiKey : TranscribeState()
     data object NeedsGroqKey : TranscribeState()
     data object NeedsSarvamKey : TranscribeState()
+    data object NeedsOtherKey : TranscribeState()
     data object SelectingLanguage : TranscribeState()
     data class Running(val status: String) : TranscribeState()
     data class Done(val text: String) : TranscribeState()
@@ -151,6 +153,7 @@ fun TranscribeDialog(file: File, onDismiss: () -> Unit) {
     var geminiKeyInput by remember { mutableStateOf("") }
     var groqKeyInput by remember { mutableStateOf("") }
     var sarvamKeyInput by remember { mutableStateOf("") }
+    var otherKeyInput by remember { mutableStateOf("") }
 
     fun runTranscription() {
         val key = when (engine) {
@@ -158,6 +161,7 @@ fun TranscribeDialog(file: File, onDismiss: () -> Unit) {
             TranscribeSettings.Engine.GROQ -> TranscribeSettings.getGroqKey(context)
             TranscribeSettings.Engine.SARVAM -> TranscribeSettings.getSarvamKey(context)
             TranscribeSettings.Engine.ASSEMBLYAI -> TranscribeSettings.getApiKey(context)
+            else -> TranscribeSettings.keyFor(context, engine)
         } ?: return
         state = TranscribeState.Running("Starting…")
         scope.launch {
@@ -167,6 +171,7 @@ fun TranscribeDialog(file: File, onDismiss: () -> Unit) {
                 TranscribeSettings.Engine.GROQ -> GroqTranscriber.transcribe(key, file, languageCode, onStatus, englishOnly)
                 TranscribeSettings.Engine.SARVAM -> SarvamTranscriber.transcribe(key, file, context.cacheDir, languageCode, onStatus, englishOnly)
                 TranscribeSettings.Engine.ASSEMBLYAI -> AssemblyAiTranscriber.transcribe(key, file, languageCode, onStatus)
+                else -> OtherTranscribers.transcribe(engine, key, file, languageCode, onStatus)
             }
             state = result.fold(
                 onSuccess = { text ->
@@ -295,6 +300,31 @@ fun TranscribeDialog(file: File, onDismiss: () -> Unit) {
                         ) { Text("Save and transcribe") }
                     }
 
+                    is TranscribeState.NeedsOtherKey -> {
+                        Text(
+                            TranscribeSettings.engineHelp(engine),
+                            style = MaterialTheme.typography.bodyMedium,
+                            textAlign = TextAlign.Center
+                        )
+                        Spacer(Modifier.height(16.dp))
+                        OutlinedTextField(
+                            value = otherKeyInput,
+                            onValueChange = { otherKeyInput = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            label = { Text(TranscribeSettings.engineKeyLabel(engine)) }
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        Button(
+                            onClick = {
+                                TranscribeSettings.setKeyFor(context, engine, otherKeyInput)
+                                otherKeyInput = ""
+                                runTranscription()
+                            },
+                            enabled = otherKeyInput.isNotBlank()
+                        ) { Text("Save and transcribe") }
+                    }
+
                     is TranscribeState.SelectingLanguage -> {
                         Text("Transcribe with", style = MaterialTheme.typography.titleMedium)
                         Spacer(Modifier.height(8.dp))
@@ -319,6 +349,18 @@ fun TranscribeDialog(file: File, onDismiss: () -> Unit) {
                                 onClick = { engine = TranscribeSettings.Engine.ASSEMBLYAI; TranscribeSettings.setEngine(context, engine) },
                                 label = { Text("AssemblyAI") }
                             )
+                            listOf(
+                                TranscribeSettings.Engine.DEEPGRAM to "Deepgram (free credit)",
+                                TranscribeSettings.Engine.MISTRAL to "Mistral Voxtral (free)",
+                                TranscribeSettings.Engine.HUGGINGFACE to "Hugging Face Whisper (free)",
+                                TranscribeSettings.Engine.CLOUDFLARE to "Cloudflare Whisper (free daily)"
+                            ).forEach { (extra, label) ->
+                                FilterChip(
+                                    selected = engine == extra,
+                                    onClick = { engine = extra; TranscribeSettings.setEngine(context, engine) },
+                                    label = { Text(label) }
+                                )
+                            }
                         }
                         Spacer(Modifier.height(20.dp))
                         Text("English", style = MaterialTheme.typography.titleMedium)
@@ -336,6 +378,7 @@ fun TranscribeDialog(file: File, onDismiss: () -> Unit) {
                                 TranscribeSettings.Engine.GROQ -> TranscribeSettings.getGroqKey(context) == null
                                 TranscribeSettings.Engine.SARVAM -> TranscribeSettings.getSarvamKey(context) == null
                                 TranscribeSettings.Engine.ASSEMBLYAI -> TranscribeSettings.getApiKey(context) == null
+                                else -> TranscribeSettings.keyFor(context, engine) == null
                             }
                             if (!missingKey) runTranscription()
                             else state = when (engine) {
@@ -343,6 +386,7 @@ fun TranscribeDialog(file: File, onDismiss: () -> Unit) {
                                 TranscribeSettings.Engine.GROQ -> TranscribeState.NeedsGroqKey
                                 TranscribeSettings.Engine.SARVAM -> TranscribeState.NeedsSarvamKey
                                 TranscribeSettings.Engine.ASSEMBLYAI -> TranscribeState.NeedsApiKey
+                                else -> TranscribeState.NeedsOtherKey
                             }
                         }) { Text("Transcribe") }
                     }
@@ -726,6 +770,7 @@ fun TranscribeDialog(file: File, onDismiss: () -> Unit) {
                                     TranscribeSettings.Engine.GROQ -> TranscribeState.NeedsGroqKey
                                     TranscribeSettings.Engine.SARVAM -> TranscribeState.NeedsSarvamKey
                                     TranscribeSettings.Engine.ASSEMBLYAI -> TranscribeState.NeedsApiKey
+                                    else -> TranscribeState.NeedsOtherKey
                                 }
                             }) { Text("Change API key") }
                         }
