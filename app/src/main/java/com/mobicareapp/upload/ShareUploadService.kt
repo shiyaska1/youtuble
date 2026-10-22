@@ -50,11 +50,13 @@ class ShareUploadService : Service() {
         if (uris.isNotEmpty()) {
             ShareUploadState.startFresh()
             val described = uris.map { it to ShareUploader.describe(this, it) }
+            // Same ending: 1.pdf, 2.pdf, 3.pdf. Different ending: each starts at 1 (1.pdf, 1.docx).
+            val names = ShareUploader.assignNames(described.map { it.second })
             val first = ShareUploadState.append(described.mapIndexed { i, (_, source) ->
-                ShareUploadItem(source.name, ShareUploader.serverNameFor(source, i + 1), source.size)
+                ShareUploadItem(source.name, names[i], source.size)
             })
             described.forEachIndexed { i, (uri, source) ->
-                queue.add(Work(uri, first + i, source, ShareUploader.serverNameFor(source, i + 1)))
+                queue.add(Work(uri, first + i, source, names[i]))
             }
         }
         if (worker?.isActive != true) {

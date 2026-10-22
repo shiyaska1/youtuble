@@ -62,6 +62,7 @@ import coil.compose.AsyncImage
 import com.mobicareapp.upload.ImageCombiner
 import com.mobicareapp.upload.PersonalServerSettings
 import com.mobicareapp.upload.PersonalServerUploader
+import com.mobicareapp.upload.ShareUploader
 import kotlinx.coroutines.launch
 
 /**
@@ -94,6 +95,7 @@ fun ImageClipboardDialog(onDismiss: () -> Unit) {
 
     // Any other kind of file: documents, zip, rar... Uploaded as "1" plus the file's own ending (1.zip).
     var files by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    var progressText by remember { mutableStateOf<String?>(null) }
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         files = files + uris.filter { it !in files }
         uploadStatus = null
@@ -148,7 +150,7 @@ fun ImageClipboardDialog(onDismiss: () -> Unit) {
                 files.forEach { uri ->
                     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            displayNameOf(context, uri) + "  →  " + serverNameFor(context, uri),
+                            displayNameOf(context, uri) + "  →  " + (planNames(context, attachments, files)[uri] ?: serverNameFor(context, uri)),
                             style = MaterialTheme.typography.bodySmall,
                             modifier = Modifier.weight(1f),
                             maxLines = 1,
@@ -235,7 +237,7 @@ fun ImageClipboardDialog(onDismiss: () -> Unit) {
                 Text("Upload to my server", style = MaterialTheme.typography.titleMedium)
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "Sends the actual file to your own server, so it can be downloaded anywhere — not limited to this phone the way clipboard copying is. Always overwrites the same file there. Photos are saved as 1.jpg, videos as 1.mp4, other files as 1 plus their own ending (1.zip, 1.pdf...).",
+                    "Sends the actual file to your own server, so it can be downloaded anywhere — not limited to this phone the way clipboard copying is. Always overwrites the same file there. Pictures become one 1.jpg. Videos and other files are named 1, 2, 3… plus their own ending (1.mp4, 1.pdf, 2.pdf), so files with the same ending never overwrite each other.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center
@@ -310,7 +312,8 @@ fun ImageClipboardDialog(onDismiss: () -> Unit) {
                                 val videos = attachments - images.toSet()
                                 var lastError: String? = null
                                 var uploadedImage = false
-                                var uploadedVideo = false
+                                val uploadedVideos = mutableListOf<String>()
+                                val names = planNames(context, attachments, files)
 
                                 if (images.isNotEmpty()) {
                                     // Always combined (even a single image) so the note text — if
@@ -326,28 +329,30 @@ fun ImageClipboardDialog(onDismiss: () -> Unit) {
                                         onFailure = { e -> lastError = e.message ?: "Couldn't combine the images" }
                                     )
                                 }
-                                // Each video overwrites the same 1.mp4 slot (separate from images'
-                                // 1.jpg) — videos can't be stacked the way images are, so if more
-                                // than one is picked, only the last one uploaded remains there.
-                                for (uri in videos) {
-                                    val mimeType = context.contentResolver.getType(uri) ?: "video/mp4"
-                                    PersonalServerUploader.upload(context, uri, mimeType, isVideo = true)
-                                        .onSuccess { uploadedVideo = true }
-                                        .onFailure { e -> lastError = e.message ?: "Upload failed" }
-                                }
-
-                                // Documents, zips and anything else: saved as 1.<its own ending>.
+                                // Videos, documents, zips and anything else go by the same rule: 1.mp4, 2.mp4, 1.pdf, 2.pdf...
+                                // (small ones through upload.php, big ones in pieces through uploadnew.php).
                                 val uploadedFiles = mutableListOf<String>()
-                                for (uri in files) {
-                                    val mimeType = context.contentResolver.getType(uri) ?: "application/octet-stream"
-                                    val name = serverNameFor(context, uri)
-                                    PersonalServerUploader.uploadAs(context, uri, mimeType, name)
-                                        .onSuccess { uploadedFiles.add(name) }
+                                suspend fun send(uri: Uri, into: MutableList<String>) {
+                                    val name = names[uri] ?: return
+                                    val source = ShareUploader.describe(context, uri)
+                                    runCatching {
+                                        ShareUploader.upload(
+                                            context, uri, source, name,
+                                            onProgress = { sent ->
+                                                progressText = if (source.size > 0) "${source.name}: ${(sent * 100 / source.size).toInt()}%" else source.name
+                                            },
+                                            cancelled = { false }
+                                        )
+                                    }
+                                        .onSuccess { into.add(name) }
                                         .onFailure { e -> lastError = e.message ?: "Upload failed" }
                                 }
+                                for (uri in videos) send(uri, uploadedVideos)
+                                for (uri in files) send(uri, uploadedFiles)
+                                progressText = null
 
                                 uploading = false
-                                if (lastError != null && !uploadedImage && !uploadedVideo && uploadedFiles.isEmpty()) {
+                                if (lastError != null && !uploadedImage && uploadedVideos.isEmpty() && uploadedFiles.isEmpty()) {
                                     uploadStatus = lastError
                                 } else {
                                     // The script keeps images and videos in separate fixed slots
@@ -359,7 +364,7 @@ fun ImageClipboardDialog(onDismiss: () -> Unit) {
                                     val folder = serverUrl.substringBeforeLast('/')
                                     val lines = mutableListOf<String>()
                                     if (uploadedImage) lines.add("Image: $folder/1.jpg")
-                                    if (uploadedVideo) lines.add("Video: $folder/1.mp4")
+                                    uploadedVideos.forEach { lines.add("Video: $folder/$it") }
                                     uploadedFiles.forEach { lines.add("File: $folder/$it") }
                                     val message = "Uploaded to the following URL(s):\n" + lines.joinToString("\n")
                                     uploadStatus = if (lastError != null) message + "\n(Some did not upload: $lastError)" else message
@@ -371,7 +376,7 @@ fun ImageClipboardDialog(onDismiss: () -> Unit) {
                         enabled = !uploading,
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text(if (uploading) "Uploading…" else "Upload to my server")
+                        Text(if (uploading) "Uploading… ${progressText.orEmpty()}" else "Upload to my server")
                     }
                     uploadStatus?.let {
                         Spacer(Modifier.height(8.dp))
@@ -423,4 +428,19 @@ private fun serverNameFor(context: android.content.Context, uri: Uri): String {
         context.contentResolver.getType(uri)?.let { MimeTypeMap.getSingleton().getExtensionFromMimeType(it) } ?: "bin"
     }
     return "1.$ext"
+}
+
+
+/**
+ * The name each picked video / file gets on the server. The pictures are always combined into the one 1.jpg;
+ * after that the first file of each ending is 1.ending, the second with the same ending 2.ending, and so on
+ * (a different ending starts again at 1), so nothing overwrites anything else in the same upload.
+ */
+private fun planNames(context: android.content.Context, picked: List<Uri>, files: List<Uri>): Map<Uri, String> {
+    val videos = picked.filter { context.contentResolver.getType(it)?.startsWith("image") != true }
+    val hasImages = picked.size > videos.size
+    val ordered = videos + files
+    val sources = ordered.map { ShareUploader.describe(context, it) }
+    val names = ShareUploader.assignNames(sources, if (hasImages) mapOf("jpg" to 1) else emptyMap())
+    return ordered.zip(names).toMap()
 }

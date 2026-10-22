@@ -57,15 +57,30 @@ object ShareUploader {
         return Source(name, size, mime)
     }
 
-    /** "1.mp4": the number plus the file's own ending, taken from its name or else from its type. */
-    fun serverNameFor(source: Source, number: Int): String {
+    /** The file's own ending (pdf, mp4...), taken from its name or else from its type. */
+    fun endingOf(source: Source): String {
         var ending = source.name.substringAfterLast('.', "").lowercase().filter { it.isLetterOrDigit() }
         if (ending.isEmpty()) {
             ending = MimeTypeMap.getSingleton().getExtensionFromMimeType(source.mime)?.lowercase() ?: "bin"
         }
         // A script must never land on the server as a script.
         if (ending in SCRIPT_ENDINGS) ending = "$ending.txt"
-        return "$number.$ending"
+        return ending
+    }
+
+    /**
+     * The names the files of one batch get on the server: the first of each ending is "1.ending", the
+     * second with the same ending "2.ending", the third "3.ending"; a different ending starts again at 1.
+     * [taken] says how many of an ending are already used (e.g. the one picture that is always 1.jpg).
+     */
+    fun assignNames(sources: List<Source>, taken: Map<String, Int> = emptyMap()): List<String> {
+        val counts = taken.toMutableMap()
+        return sources.map { source ->
+            val ending = endingOf(source)
+            val number = (counts[ending] ?: 0) + 1
+            counts[ending] = number
+            "$number.$ending"
+        }
     }
 
     /** The folder on the server that the upload script is in (no trailing slash). */
