@@ -1,6 +1,8 @@
 package com.mobicareapp.ui.handwriting
 
 import android.content.ClipData
+import androidx.compose.material.icons.filled.ArrowDropDown
+import kotlinx.coroutines.flow.first
 import androidx.compose.material.icons.filled.SaveAs
 import androidx.compose.ui.graphics.asAndroidBitmap
 import com.mobicareapp.handwriting.ItemGeometry
@@ -1268,6 +1270,7 @@ fun TypeTextDialog(
 
     // --- voice tools ---
     var showVoice by remember { mutableStateOf(false) }
+    var engineMenu by remember { mutableStateOf(false) }
     var showPicker by remember { mutableStateOf(false) }
     var engine by remember { mutableStateOf(TranscribeSettings.getEngine(context)) }
     var voiceStatus by remember { mutableStateOf<String?>(null) }
@@ -1297,8 +1300,22 @@ fun TypeTextDialog(
     }
     val hasKey = remember(engine, keyVersion) { keyFor(engine) != null }
 
+    // Set when the recording that is being stopped is not wanted (cancelled, or the voice picker was chosen instead).
+    var discardNext by remember { mutableStateOf(false) }
+
+    // Removes a recording (its file and its Library entry), so it does not stay behind as a copy in the Library.
+    suspend fun removeFromLibrary(path: String) {
+        withContext(Dispatchers.IO) {
+            val dao = (context.applicationContext as com.mobicareapp.YtSaverApp).database.savedMediaDao()
+            val row = dao.observeAll().first().firstOrNull { it.filePath == path }
+            com.mobicareapp.data.MediaAccess.delete(context, path)
+            if (row != null) dao.delete(row)
+        }
+    }
+
     // Transcribes [file] with the chosen engine and adds the words to the box.
-    fun transcribe(file: File) {
+    // [madeHere]: the recording was just made in this window; if nothing was said in it, it is not kept in the Library.
+    fun transcribe(file: File, madeHere: Boolean = false) {
         voiceError = null
         voiceStatus = "Transcribing…"
         // Remembered until its text is in the box, so a kill in between is picked up again next time.
@@ -1308,8 +1325,10 @@ fun TypeTextDialog(
             voiceStatus = null
             result
                 .onSuccess { heard ->
-                    if (heard.isBlank()) voiceError = "No speech was recognized"
-                    else {
+                    if (heard.isBlank()) {
+                        voiceError = "No speech was recognized"
+                        if (madeHere) scope.launch { runCatching { removeFromLibrary(file.absolutePath) } }
+                    } else {
                         text = if (text.isBlank()) heard.trim() else text.trimEnd() + " " + heard.trim()
                         if (!simple) TypedDraft.setText(context, text)
                     }
@@ -1322,9 +1341,17 @@ fun TypeTextDialog(
     // The recording that was just stopped here has been saved: transcribe it.
     LaunchedEffect(finished) {
         val done = finished
-        if (waitingForRecording && done != null && done.type == com.mobicareapp.data.MediaType.AUDIO) {
-            waitingForRecording = false
-            transcribe(File(done.filePath))
+        if (done != null && done.type == com.mobicareapp.data.MediaType.AUDIO) {
+            if (discardNext) {
+                // Cancelled: the clip is thrown away, nothing is transcribed and no copy stays in the Library.
+                discardNext = false
+                waitingForRecording = false
+                voiceStatus = null
+                runCatching { removeFromLibrary(done.filePath) }
+            } else if (waitingForRecording) {
+                waitingForRecording = false
+                transcribe(File(done.filePath), madeHere = true)
+            }
         }
     }
 
@@ -1443,7 +1470,14 @@ fun TypeTextDialog(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(if (simple) "Notes" else "Type text", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
                     // Opening the voice tools starts recording at once, so it can't be forgotten (needs the engine's key first).
-                    if (!simple) OutlinedButton(onClick = { showVoice = !showVoice }) {
+                    if (!simple) OutlinedButton(onClick = {
+                        // Hiding the tools within moments of opening them (the recording started by itself) cancels that recording.
+                        if (showVoice && recordingHere && elapsed < 5) {
+                            discardNext = true
+                            AudioRecordService.stop(context)
+                        }
+                        showVoice = !showVoice
+                    }) {
                         Icon(Icons.Default.Mic, contentDescription = null, modifier = Modifier.size(20.dp))
                         Spacer(Modifier.width(6.dp))
                         Text(if (showVoice) "Hide voice" else "Voice", style = MaterialTheme.typography.titleMedium)
@@ -1567,6 +1601,12 @@ fun TypeTextDialog(
                                         Spacer(Modifier.width(6.dp))
                                         Text("Stop  %d:%02d".format(elapsed / 60, elapsed % 60), style = MaterialTheme.typography.titleMedium)
                                     }
+                                    // Recording started by itself but a recorded voice is wanted: cancel it (nothing is kept) and pick.
+                                    OutlinedButton(onClick = {
+                                        discardNext = true
+                                        AudioRecordService.stop(context)
+                                        showPicker = true
+                                    }) { Text("Cancel and pick a voice", style = MaterialTheme.typography.titleMedium) }
                                 } else {
                                     Button(onClick = { startRecording() }, enabled = voiceStatus == null && hasKey) {
                                         Icon(Icons.Default.Mic, contentDescription = null, modifier = Modifier.size(20.dp))
@@ -1578,23 +1618,33 @@ fun TypeTextDialog(
                                     }
                                 }
                             }
-                            Text("Transcribe with", style = MaterialTheme.typography.labelLarge)
-                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                listOf(
-                                    "Gemini" to TranscribeSettings.Engine.GEMINI,
-                                    "Groq" to TranscribeSettings.Engine.GROQ,
-                                    "Sarvam" to TranscribeSettings.Engine.SARVAM,
-                                    "AssemblyAI" to TranscribeSettings.Engine.ASSEMBLYAI,
-                                    "Deepgram" to TranscribeSettings.Engine.DEEPGRAM,
-                                    "Mistral" to TranscribeSettings.Engine.MISTRAL,
-                                    "Hugging Face" to TranscribeSettings.Engine.HUGGINGFACE,
-                                    "Cloudflare" to TranscribeSettings.Engine.CLOUDFLARE
-                                ).forEach { (label, value) ->
-                                    FilterChip(
-                                        selected = engine == value,
-                                        onClick = { engine = value; TranscribeSettings.setEngine(context, value); keyInput = "" },
-                                        label = { Text(label, style = MaterialTheme.typography.titleMedium) }
-                                    )
+                            // The engines are in a dropdown (eight buttons took a lot of room).
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text("Transcribe with", style = MaterialTheme.typography.labelLarge)
+                                Box {
+                                    OutlinedButton(onClick = { engineMenu = true }) {
+                                        Text(TranscribeSettings.engineName(engine), style = MaterialTheme.typography.titleMedium)
+                                        Icon(Icons.Default.ArrowDropDown, contentDescription = "Choose the engine")
+                                    }
+                                    DropdownMenu(expanded = engineMenu, onDismissRequest = { engineMenu = false }) {
+                                        TranscribeSettings.Engine.values().forEach { option ->
+                                            DropdownMenuItem(
+                                                text = {
+                                                    Text(
+                                                        (if (option == engine) "✓ " else "") + TranscribeSettings.engineName(option) +
+                                                            (if (keyFor(option) == null) "  (needs a key)" else ""),
+                                                        style = MaterialTheme.typography.titleMedium
+                                                    )
+                                                },
+                                                onClick = {
+                                                    engineMenu = false
+                                                    engine = option
+                                                    TranscribeSettings.setEngine(context, option)
+                                                    keyInput = ""
+                                                }
+                                            )
+                                        }
+                                    }
                                 }
                             }
                             // The chosen engine has no key yet: ask for it right here.
