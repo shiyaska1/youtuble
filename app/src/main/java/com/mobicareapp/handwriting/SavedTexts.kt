@@ -68,5 +68,8 @@ class SavedTextStore(private val fileName: String) {
 /** The texts saved from the handwriting screen's "Type text" window. */
 val SavedTexts = SavedTextStore("handwriting_saved_texts.json")
 
+/** The notes written next to an uploaded link (the Share to server screen): a group of their own too. */
+val LinkNotes = SavedTextStore("link_notes_saved_texts.json")
+
 /** The texts saved from the bench cabinet calculator: a separate group, never shown in the writing tool. */
 val CalculatorNotes = SavedTextStore("calculator_saved_texts.json")

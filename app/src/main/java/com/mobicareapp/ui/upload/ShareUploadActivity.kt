@@ -18,6 +18,18 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.FilterChip
+import android.content.ClipData
+import android.content.ClipboardManager
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.unit.sp
+import com.mobicareapp.handwriting.LinkNotes
+import com.mobicareapp.ui.handwriting.TypeTextDialog
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -97,6 +109,7 @@ class ShareUploadActivity : ComponentActivity() {
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ShareUploadScreen(notConfigured: Boolean, onClose: () -> Unit) {
     val context = LocalContext.current
@@ -104,6 +117,34 @@ private fun ShareUploadScreen(notConfigured: Boolean, onClose: () -> Unit) {
     val running by ShareUploadState.running.collectAsState()
     val allDone = !running && items.isNotEmpty()
     val urls = items.filter { it.status == UploadStatus.DONE }.mapNotNull { it.url }
+
+    // Notes written (or spoken) for this link, and how big they are shown; the one top button copies them together with the URL.
+    var note by rememberSaveable { mutableStateOf("") }
+    var noteSize by rememberSaveable { mutableStateOf(0.075f) }
+    var showNoteWindow by remember { mutableStateOf(false) }
+    val noteSp = when {
+        noteSize <= 0.05f -> 24.sp
+        noteSize <= 0.08f -> 32.sp
+        else -> 42.sp
+    }
+    fun copyTextAndUrl() {
+        val combined = (listOf(note.trim()).filter { it.isNotEmpty() } + urls).joinToString("\n")
+        context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Notes and URL", combined))
+        Toast.makeText(context, if (note.isBlank()) "URL copied" else "Text and URL copied together", Toast.LENGTH_SHORT).show()
+    }
+
+    if (showNoteWindow) {
+        // The same window as "Type text" on the writing screen: big letters, voice recording and transcribing.
+        TypeTextDialog(
+            onInsert = { text, size -> note = text; noteSize = size; showNoteWindow = false },
+            onDismiss = { showNoteWindow = false },
+            store = LinkNotes,
+            initialText = note,
+            useDraft = false,
+            insertLabel = "Use this text",
+            initialSize = noteSize
+        )
+    }
 
     // The moment it finishes: the address goes on the clipboard.
     LaunchedEffect(allDone, urls.size) {
@@ -116,6 +157,13 @@ private fun ShareUploadScreen(notConfigured: Boolean, onClose: () -> Unit) {
     ) {
         Text("Upload to my server", style = MaterialTheme.typography.headlineSmall)
 
+        // One tap at the top: the notes and the uploaded URL go on the clipboard together.
+        if (urls.isNotEmpty()) {
+            Button(onClick = { copyTextAndUrl() }, modifier = Modifier.fillMaxWidth()) {
+                Text(if (note.isBlank()) "Copy the URL" else "Copy text + URL (one copy)", style = MaterialTheme.typography.titleMedium)
+            }
+        }
+
         if (notConfigured && items.isEmpty()) {
             Text("Your server is not set up yet. Open YT Saver, go to Record, Copy images/videos, and save the server address and key. Then share again.")
             Button(onClick = {
@@ -127,6 +175,24 @@ private fun ShareUploadScreen(notConfigured: Boolean, onClose: () -> Unit) {
 
         if (items.isEmpty()) Text("Nothing is being uploaded.")
         items.forEach { ItemRow(it) }
+
+        // Notes for this link: type here, or open the bigger window to speak and transcribe.
+        Text("Notes for this link", style = MaterialTheme.typography.titleSmall)
+        OutlinedTextField(
+            value = note,
+            onValueChange = { note = it },
+            textStyle = TextStyle(fontSize = noteSp),
+            minLines = 3,
+            placeholder = { Text("Type your notes here…") },
+            modifier = Modifier.fillMaxWidth()
+        )
+        androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf("Normal" to 0.045f, "Big" to 0.075f, "Extra big" to 0.11f).forEach { (label, value) ->
+                FilterChip(selected = noteSize == value, onClick = { noteSize = value }, label = { Text(label) })
+            }
+            OutlinedButton(onClick = { showNoteWindow = true }) { Text("Voice / bigger window") }
+            if (note.isNotEmpty()) OutlinedButton(onClick = { note = "" }) { Text("Clear") }
+        }
 
         if (running) {
             Text(
