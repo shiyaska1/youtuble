@@ -69,7 +69,7 @@
             android:name=".ui.upload.ShareUploadActivity"
             android:exported="true"
             android:label="Upload to my server"
-            android:launchMode="singleTop"
+            android:launchMode="singleTask"
             android:theme="@style/Theme.YtSaver">
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />

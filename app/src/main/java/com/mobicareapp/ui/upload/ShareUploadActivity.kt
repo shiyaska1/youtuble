@@ -18,6 +18,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilterChip
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -60,13 +62,22 @@ import com.mobicareapp.upload.UploadStatus
 class ShareUploadActivity : ComponentActivity() {
     private var notConfigured = false
 
+    /** Files just shared while an earlier work is still on this screen: waiting for "same work or new work?". */
+    private var pendingShare by mutableStateOf<List<Uri>?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         if (savedInstanceState == null) handleShare(intent)
         setContent {
             YtSaverTheme {
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    ShareUploadScreen(notConfigured = notConfigured, onClose = { finish() })
+                    ShareUploadScreen(
+                        notConfigured = notConfigured,
+                        pendingCount = pendingShare?.size ?: 0,
+                        onSameWork = { chooseWork(sameWork = true) },
+                        onNewWork = { chooseWork(sameWork = false) },
+                        onClose = { finish() }
+                    )
                 }
             }
         }
@@ -105,13 +116,35 @@ class ShareUploadActivity : ComponentActivity() {
             notConfigured = true
             return
         }
-        ShareUploadService.start(this, uris)
+        val earlierWork = ShareUploadState.items.value.isNotEmpty()
+        when {
+            // Nothing on this screen yet: a new work.
+            !earlierWork -> ShareUploadService.start(this, uris, sameWork = false)
+            // An upload is still going: this is certainly more of the same work.
+            ShareUploadState.running.value -> ShareUploadService.start(this, uris, sameWork = true)
+            // Otherwise ask once.
+            else -> pendingShare = uris
+        }
+    }
+
+    /** The answer to "same work or new work?" for the files that were just shared. */
+    private fun chooseWork(sameWork: Boolean) {
+        val uris = pendingShare ?: return
+        pendingShare = null
+        if (!sameWork) ShareUploadState.resetAll()
+        ShareUploadService.start(this, uris, sameWork)
     }
 }
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun ShareUploadScreen(notConfigured: Boolean, onClose: () -> Unit) {
+private fun ShareUploadScreen(
+    notConfigured: Boolean,
+    pendingCount: Int,
+    onSameWork: () -> Unit,
+    onNewWork: () -> Unit,
+    onClose: () -> Unit
+) {
     val context = LocalContext.current
     val items by ShareUploadState.items.collectAsState()
     val running by ShareUploadState.running.collectAsState()
@@ -119,7 +152,8 @@ private fun ShareUploadScreen(notConfigured: Boolean, onClose: () -> Unit) {
     val urls = items.filter { it.status == UploadStatus.DONE }.mapNotNull { it.url }
 
     // Notes written (or spoken) for this link, and how big they are shown; the one top button copies them together with the URL.
-    var note by rememberSaveable { mutableStateOf("") }
+    val note by ShareUploadState.note.collectAsState()
+    fun setNote(value: String) { ShareUploadState.note.value = value }
     var noteSize by rememberSaveable { mutableStateOf(0.075f) }
     var showNoteWindow by remember { mutableStateOf(false) }
     val noteSp = when {
@@ -133,10 +167,27 @@ private fun ShareUploadScreen(notConfigured: Boolean, onClose: () -> Unit) {
         Toast.makeText(context, if (note.isBlank()) "URL copied" else "Text and URL copied together", Toast.LENGTH_SHORT).show()
     }
 
+    // New files were shared while an earlier work is on this screen: same work (added here, numbering goes on) or a new one?
+    if (pendingCount > 0) {
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text("Same work or a new work?") },
+            text = {
+                Text(
+                    "$pendingCount new file(s) were shared. Is this more of the work above, or a new work?\n\n" +
+                        "Same work: they are added to this page, and the numbers go on (1.jpg, then 2.jpg). A different ending starts at 1.\n\n" +
+                        "New work: this page starts again and the numbers start at 1 (an old 1.jpg on the server is replaced)."
+                )
+            },
+            confirmButton = { TextButton(onClick = onSameWork) { Text("Same work") } },
+            dismissButton = { TextButton(onClick = onNewWork) { Text("New work") } }
+        )
+    }
+
     if (showNoteWindow) {
         // The same window as "Type text" on the writing screen: big letters, voice recording and transcribing.
         TypeTextDialog(
-            onInsert = { text, size -> note = text; noteSize = size; showNoteWindow = false },
+            onInsert = { text, size -> setNote(text); noteSize = size; showNoteWindow = false },
             onDismiss = { showNoteWindow = false },
             store = LinkNotes,
             initialText = note,
@@ -180,7 +231,7 @@ private fun ShareUploadScreen(notConfigured: Boolean, onClose: () -> Unit) {
         Text("Notes for this link", style = MaterialTheme.typography.titleSmall)
         OutlinedTextField(
             value = note,
-            onValueChange = { note = it },
+            onValueChange = { setNote(it) },
             textStyle = TextStyle(fontSize = noteSp),
             minLines = 3,
             placeholder = { Text("Type your notes here…") },
@@ -191,7 +242,7 @@ private fun ShareUploadScreen(notConfigured: Boolean, onClose: () -> Unit) {
                 FilterChip(selected = noteSize == value, onClick = { noteSize = value }, label = { Text(label) })
             }
             OutlinedButton(onClick = { showNoteWindow = true }) { Text("Voice / bigger window") }
-            if (note.isNotEmpty()) OutlinedButton(onClick = { note = "" }) { Text("Clear") }
+            if (note.isNotEmpty()) OutlinedButton(onClick = { setNote("") }) { Text("Clear") }
         }
 
         if (running) {

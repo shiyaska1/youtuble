@@ -31,6 +31,28 @@ object ShareUploadState {
 
     fun setRunning(running: Boolean) { _running.value = running }
 
+    /** The notes written for the work on screen (they stay with it while more files are added). */
+    val note = MutableStateFlow("")
+
+    /** Forgets the work on screen (its files, URLs and notes): the next share is a new work and numbers start at 1 again. */
+    fun resetAll() {
+        if (!_running.value) {
+            _items.value = emptyList()
+            note.value = ""
+        }
+    }
+
+    /** How far each ending has got in the work on screen (1.jpg, 2.jpg gives jpg to 2), so more files carry on from there. */
+    fun takenCounts(): Map<String, Int> {
+        val taken = mutableMapOf<String, Int>()
+        _items.value.forEach { item ->
+            val number = item.serverName.substringBefore('.').toIntOrNull() ?: return@forEach
+            val ending = item.serverName.substringAfter('.')
+            taken[ending] = maxOf(taken[ending] ?: 0, number)
+        }
+        return taken
+    }
+
     /** Adds files to the list; returns the index of the first new one. */
     fun append(newItems: List<ShareUploadItem>): Int {
         var first = 0

@@ -48,10 +48,12 @@ class ShareUploadService : Service() {
 
         val uris = uriList(intent)
         if (uris.isNotEmpty()) {
-            ShareUploadState.startFresh()
+            // More files of the same work carry on from the numbers already used; a new work starts again at 1.
+            val sameWork = intent?.getBooleanExtra(EXTRA_SAME_WORK, false) == true
+            if (!sameWork) ShareUploadState.startFresh()
             val described = uris.map { it to ShareUploader.describe(this, it) }
             // Same ending: 1.pdf, 2.pdf, 3.pdf. Different ending: each starts at 1 (1.pdf, 1.docx).
-            val names = ShareUploader.assignNames(described.map { it.second })
+            val names = ShareUploader.assignNames(described.map { it.second }, if (sameWork) ShareUploadState.takenCounts() else emptyMap())
             val first = ShareUploadState.append(described.mapIndexed { i, (_, source) ->
                 ShareUploadItem(source.name, names[i], source.size)
             })
@@ -207,11 +209,13 @@ class ShareUploadService : Service() {
         private const val FINISHED_ID = 7302
         private const val ACTION_CANCEL = "com.mobicareapp.upload.CANCEL_SHARE_UPLOAD"
         private const val EXTRA_URIS = "uris"
+        private const val EXTRA_SAME_WORK = "same_work"
 
         /** Starts uploading [uris]. The service is given read permission for them along with the intent. */
-        fun start(context: Context, uris: List<Uri>) {
+        fun start(context: Context, uris: List<Uri>, sameWork: Boolean = false) {
             val intent = Intent(context, ShareUploadService::class.java)
                 .putParcelableArrayListExtra(EXTRA_URIS, ArrayList(uris))
+                .putExtra(EXTRA_SAME_WORK, sameWork)
                 .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             if (uris.isNotEmpty()) {
                 intent.clipData = ClipData.newRawUri("shared", uris.first()).also { clip -> uris.drop(1).forEach { clip.addItem(ClipData.Item(it)) } }
