@@ -38,6 +38,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Calculate
+import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.ArrowBack
@@ -126,6 +127,7 @@ fun ScanScreen() {
     var showPassportPhoto by remember { mutableStateOf(false) }
     var showCollage by remember { mutableStateOf(false) }
     var showBenchCalc by remember { mutableStateOf(false) }
+    var showScrollShot by remember { mutableStateOf(false) }
     var showPdfTextExtract by remember { mutableStateOf(false) }
     var showImageMarkup by remember { mutableStateOf(false) }
     var showQuestionPaper by remember { mutableStateOf(false) }
@@ -173,6 +175,11 @@ fun ScanScreen() {
 
     if (showPassportPhoto) {
         PassportPhotoScreen(onBack = { showPassportPhoto = false })
+        return
+    }
+
+    if (showScrollShot) {
+        ScrollShotScreen(onBack = { showScrollShot = false })
         return
     }
 
@@ -297,6 +304,11 @@ fun ScanScreen() {
                                 text = { Text("Combine photos into a grid") },
                                 onClick = { showMoreTools = false; showCollage = true },
                                 leadingIcon = { Icon(Icons.Default.GridView, contentDescription = null) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Scrolling video → long screenshot") },
+                                onClick = { showMoreTools = false; showScrollShot = true },
+                                leadingIcon = { Icon(Icons.Default.VideoLibrary, contentDescription = null) }
                             )
                             DropdownMenuItem(
                                 text = { Text("Bench cabinet calculator") },
