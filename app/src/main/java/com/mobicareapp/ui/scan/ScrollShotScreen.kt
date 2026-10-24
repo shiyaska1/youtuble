@@ -20,6 +20,8 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.exponentialDecay
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateCentroid
@@ -33,19 +35,26 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.material.icons.filled.ZoomOut
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -62,10 +71,10 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -75,11 +84,15 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.util.VelocityTracker
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.FileProvider
+import coil.compose.AsyncImage
 import com.mobicareapp.applock.AppLockManager
 import com.mobicareapp.scrollshot.ScrollOcr
 import com.mobicareapp.scrollshot.ScrollStitcher
@@ -96,14 +109,16 @@ import kotlin.math.min
 private sealed class ScrollStage {
     data object Idle : ScrollStage()
     data class Working(val status: String) : ScrollStage()
-    data class Done(val result: ScrollStitcher.Stitched) : ScrollStage()
+    data class Done(val analysis: ScrollStitcher.Analysis, val result: ScrollStitcher.Stitched) : ScrollStage()
     data class Failed(val message: String) : ScrollStage()
 }
 
 /**
- * Makes one long picture from a screen recording of something being scrolled, and shows it right here
- * (pinch to zoom in and out, drag in every direction, double tap to zoom), so it can be read from top to
- * bottom without saving anything. The picture can also be read as text (OCR), uploaded, saved or shared.
+ * Makes one long (or wide) picture from a screen recording of something being scrolled, up and down or
+ * sideways, with nothing repeated, and shows it right here (pinch to zoom in and out, drag in every
+ * direction, double tap to zoom), so it can be read from end to end without saving anything. Pictures
+ * that came out unclear can be ticked and removed, and the picture is made again from the rest. It can
+ * also be read as text (OCR), uploaded, saved or shared.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -114,20 +129,35 @@ fun ScrollShotScreen(onBack: () -> Unit) {
     var ocrText by remember { mutableStateOf<String?>(null) }
     var ocrBusy by remember { mutableStateOf<String?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
+    var showReview by remember { mutableStateOf(false) }
+    // The pictures taken out of the video that were ticked as unclear (their numbers).
+    var removed by remember { mutableStateOf<Set<Int>>(emptySet()) }
 
     // Picking a video leaves the app for a moment, and making the picture takes a while.
     DisposableEffect(Unit) {
         AppLockManager.acquireLockHold()
         onDispose { AppLockManager.releaseLockHold() }
     }
+    // The pictures kept for the review are not needed once the screen is left.
+    DisposableEffect(Unit) {
+        onDispose { ScrollStitcher.discard((stage as? ScrollStage.Done)?.analysis) }
+    }
     BackHandler(onBack = onBack)
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
         if (uri != null) {
+            ScrollStitcher.discard((stage as? ScrollStage.Done)?.analysis)
+            removed = emptySet()
+            message = null
             stage = ScrollStage.Working("Starting…")
             scope.launch {
-                ScrollStitcher.stitch(context, uri) { status -> stage = ScrollStage.Working(status) }
-                    .onSuccess { stage = ScrollStage.Done(it) }
+                val analysis = ScrollStitcher.analyze(context, uri) { status -> stage = ScrollStage.Working(status) }
+                analysis
+                    .onSuccess { found ->
+                        ScrollStitcher.compose(context, found, emptySet()) { status -> stage = ScrollStage.Working(status) }
+                            .onSuccess { stage = ScrollStage.Done(found, it) }
+                            .onFailure { stage = ScrollStage.Failed(it.message ?: "Couldn't make the picture") }
+                    }
                     .onFailure { stage = ScrollStage.Failed(it.message ?: "Couldn't make the picture") }
             }
         }
@@ -155,6 +185,35 @@ fun ScrollShotScreen(onBack: () -> Unit) {
         )
     }
 
+    // Review: the pictures taken from the video, with a tick box on each; ticked ones are left out when the picture is made again.
+    (stage as? ScrollStage.Done)?.let { done ->
+        if (showReview) {
+            ReviewPicturesDialog(
+                analysis = done.analysis,
+                removed = removed,
+                onRemovedChange = { removed = it },
+                onClose = { showReview = false },
+                onMakeAgain = {
+                    showReview = false
+                    val before = done.result.files
+                    scope.launch {
+                        stage = ScrollStage.Working("Making the picture again…")
+                        ScrollStitcher.compose(context, done.analysis, removed) { status -> stage = ScrollStage.Working(status) }
+                            .onSuccess {
+                                before.forEach { file -> runCatching { file.delete() } }
+                                stage = ScrollStage.Done(done.analysis, it)
+                                message = "Made again without ${removed.size} picture(s)."
+                            }
+                            .onFailure {
+                                stage = done
+                                message = it.message ?: "Couldn't make the picture again"
+                            }
+                    }
+                }
+            )
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -172,13 +231,14 @@ fun ScrollShotScreen(onBack: () -> Unit) {
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
                         Text(
-                            "Record your screen while you slowly scroll down a page (a chat, a web page, a document), then choose that video here. " +
-                                "The pictures of the scrolled screen are joined into one long picture that you can read from top to bottom, " +
-                                "with zoom, in any direction, and read as text.",
+                            "Record your screen while you slowly scroll a page (a chat, a web page, a document, a row of pictures), up and down or sideways, " +
+                                "then choose that video here. The scrolled screens are joined into one long picture with no part repeated, " +
+                                "that you can read from end to end, with zoom, in any direction, and read as text.",
                             style = MaterialTheme.typography.bodyMedium
                         )
                         Text(
-                            "Scroll at a steady, not too fast speed for the best result. Bars that stay in place (a title bar, a bottom bar) are left out.",
+                            "Scroll at a steady, not too fast speed for the best result. Bars that stay in place (a title bar, a bottom bar) are left out. " +
+                                "Afterwards you can tick unclear parts and remove them.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -206,11 +266,12 @@ fun ScrollShotScreen(onBack: () -> Unit) {
 
                 is ScrollStage.Done -> {
                     val result = current.result
-                    // The buttons: read the text, upload, save to the phone, share.
+                    // The buttons: remove unclear parts, read the text, upload, save to the phone, share.
                     Row(
                         modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp, vertical = 4.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
+                        OutlinedButton(enabled = ocrBusy == null, onClick = { showReview = true }) { Text("Remove unclear parts") }
                         OutlinedButton(enabled = ocrBusy == null, onClick = {
                             scope.launch {
                                 ocrBusy = "Reading the text…"
@@ -246,13 +307,96 @@ fun ScrollShotScreen(onBack: () -> Unit) {
                         Text(it, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp))
                     }
                     Text(
-                        "${result.files.size} picture(s), ${result.heights.sum()} px tall" +
+                        (if (result.horizontal) "A sideways scroll: " else "") + "${result.files.size} picture(s), ${result.lengths.sum()} px " +
+                            (if (result.horizontal) "wide" else "tall") +
                             if (result.jumps > 0) ". The scrolling jumped ${result.jumps} time(s): a thin red line marks where." else ".",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(horizontal = 16.dp)
                     )
-                    LongPictureViewer(files = result.files, modifier = Modifier.weight(1f).fillMaxWidth())
+                    LongPictureViewer(files = result.files, horizontal = result.horizontal, modifier = Modifier.weight(1f).fillMaxWidth())
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Every picture taken out of the video, with a tick box: tick the unclear ones (a blurred one is marked
+ * as a suggestion), and the long picture is made again without them. Nothing is repeated in it, and the
+ * part that belonged to a removed picture is simply left out (what was beside it is joined up).
+ */
+@Composable
+private fun ReviewPicturesDialog(
+    analysis: ScrollStitcher.Analysis,
+    removed: Set<Int>,
+    onRemovedChange: (Set<Int>) -> Unit,
+    onClose: () -> Unit,
+    onMakeAgain: () -> Unit
+) {
+    Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        androidx.compose.material3.Surface(modifier = Modifier.fillMaxSize()) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                Row(modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Remove unclear parts", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+                    IconButton(onClick = onClose) { Icon(Icons.Default.Close, contentDescription = "Close") }
+                }
+                Text(
+                    "These are the pictures the long picture was made from, in order. Tick the ones that are unclear (a blurred one says \"unclear\"). " +
+                        "The long picture is made again without them: nothing is repeated, and their part is simply left out.",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(onClick = {
+                        onRemovedChange(analysis.frames.withIndex().filter { it.value.unclear }.map { it.index }.toSet())
+                    }) { Text("Tick the unclear ones") }
+                    OutlinedButton(onClick = { onRemovedChange(emptySet()) }) { Text("Untick all") }
+                    Button(
+                        enabled = removed.size < analysis.frames.size,
+                        onClick = onMakeAgain
+                    ) { Text(if (removed.isEmpty()) "Make the picture again" else "Remove ${removed.size} and make again") }
+                }
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(3),
+                    modifier = Modifier.fillMaxSize().padding(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    itemsIndexed(analysis.frames) { index, frame ->
+                        val ticked = index in removed
+                        Box(
+                            modifier = Modifier
+                                .aspectRatio(0.6f)
+                                .border(
+                                    if (ticked) 3.dp else 1.dp,
+                                    if (ticked) MaterialTheme.colorScheme.error else Color.Gray,
+                                    RoundedCornerShape(6.dp)
+                                )
+                                .clickable { onRemovedChange(if (ticked) removed - index else removed + index) }
+                        ) {
+                            AsyncImage(
+                                model = frame.file,
+                                contentDescription = "Picture ${index + 1}",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                            Checkbox(
+                                checked = ticked,
+                                onCheckedChange = { onRemovedChange(if (ticked) removed - index else removed + index) },
+                                modifier = Modifier.align(Alignment.TopStart)
+                            )
+                            Text(
+                                "${index + 1}" + if (frame.unclear) "  unclear" else "",
+                                color = Color.White,
+                                style = MaterialTheme.typography.labelMedium,
+                                modifier = Modifier.align(Alignment.BottomStart).background(Color(0xAA000000)).padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -311,31 +455,34 @@ private fun shareParts(context: Context, files: List<File>) {
     context.startActivity(Intent.createChooser(intent, "Share the long picture"))
 }
 
-private const val TILE_HEIGHT = 1024
-private const val DIVIDER_HEIGHT = 10
+private const val TILE_LENGTH = 1024
+private const val DIVIDER_LENGTH = 10
 
 /**
- * Shows the long picture(s) one above the other and lets you move over it in every direction: drag to
- * scroll up, down, left and right, pinch (or the + and - buttons, or a double tap) to zoom in and out. Only
- * the pieces on the screen are loaded (at a lower detail when zoomed out), so a very long picture is fine.
+ * Shows the long (or wide) picture(s) one after the other and lets you move over it in every direction:
+ * drag to scroll up, down, left and right, pinch (or the + and - buttons, or a double tap) to zoom in and
+ * out. Only the pieces on the screen are loaded (at a lower detail when zoomed out), so a very long
+ * picture is fine.
  */
 @Composable
-private fun LongPictureViewer(files: List<File>, modifier: Modifier = Modifier) {
+private fun LongPictureViewer(files: List<File>, horizontal: Boolean, modifier: Modifier = Modifier) {
     val scope = rememberCoroutineScope()
     val decoders = remember(files) { files.map { BitmapRegionDecoder.newInstance(it.absolutePath, false) } }
     DisposableEffect(decoders) { onDispose { decoders.forEach { runCatching { it.recycle() } } } }
-    val imageWidth = decoders.first().width
+    fun along(d: BitmapRegionDecoder) = if (horizontal) d.width else d.height
+    val across = if (horizontal) decoders.first().height else decoders.first().width
     // Where each picture starts in the combined picture (with a thin line between pictures).
-    val partTops = remember(decoders) {
-        var y = 0
-        decoders.map { d -> val top = y; y += d.height + DIVIDER_HEIGHT; top }
+    val partStarts = remember(decoders) {
+        var position = 0
+        decoders.map { d -> val start = position; position += along(d) + DIVIDER_LENGTH; start }
     }
-    val totalHeight = decoders.last().height + partTops.last()
+    val totalAlong = along(decoders.last()) + partStarts.last()
 
     BoxWithConstraints(modifier = modifier.background(Color(0xFF3A3A3A))) {
         val viewW = constraints.maxWidth.toFloat()
         val viewH = constraints.maxHeight.toFloat()
-        val fit = viewW / imageWidth
+        // First the whole width (or, for a sideways picture, the whole height) is shown.
+        val fit = if (horizontal) viewH / across else viewW / across
         var scale by remember(files) { mutableFloatStateOf(fit) }
         var offsetX by remember(files) { mutableFloatStateOf(0f) }
         var offsetY by remember(files) { mutableFloatStateOf(0f) }
@@ -345,13 +492,15 @@ private fun LongPictureViewer(files: List<File>, modifier: Modifier = Modifier) 
         val minScale = fit * 0.25f
         val maxScale = fit * 8f
 
+        fun contentW(s: Float) = (if (horizontal) totalAlong else across) * s
+        fun contentH(s: Float) = (if (horizontal) across else totalAlong) * s
         fun clampX(x: Float, s: Float): Float {
-            val w = imageWidth * s
+            val w = contentW(s)
             return if (w <= viewW) (viewW - w) / 2f else x.coerceIn(viewW - w, 0f)
         }
         fun clampY(y: Float, s: Float): Float {
-            val h = totalHeight * s
-            return if (h <= viewH) 0f else y.coerceIn(viewH - h, 0f)
+            val h = contentH(s)
+            return if (h <= viewH) (viewH - h) / 2f else y.coerceIn(viewH - h, 0f)
         }
         fun zoomAt(centroid: Offset, factor: Float) {
             val newScale = (scale * factor).coerceIn(minScale, maxScale)
@@ -361,7 +510,7 @@ private fun LongPictureViewer(files: List<File>, modifier: Modifier = Modifier) 
             offsetX = clampX(centroid.x - imageX * newScale, newScale)
             offsetY = clampY(centroid.y - imageY * newScale, newScale)
         }
-        LaunchedEffect(files, viewW) { offsetX = clampX(offsetX, scale); offsetY = clampY(offsetY, scale) }
+        LaunchedEffect(files, viewW, viewH) { offsetX = clampX(offsetX, scale); offsetY = clampY(offsetY, scale) }
 
         // The detail needed: half, quarter... of the picture's pixels when zoomed out.
         val sampleLog = when {
@@ -370,19 +519,19 @@ private fun LongPictureViewer(files: List<File>, modifier: Modifier = Modifier) 
             scale >= 0.22f -> 2
             else -> 3
         }
-        // Which pieces are showing now: (picture, piece, detail).
-        val visibleTop = (-offsetY / scale).coerceAtLeast(0f)
-        val visibleBottom = ((-offsetY + viewH) / scale).coerceAtMost(totalHeight.toFloat())
-        val needed = remember(visibleTop.toInt() / 256, visibleBottom.toInt() / 256, sampleLog, files) {
+        // The part of the combined picture on the screen now, along its direction.
+        val visibleFrom = ((if (horizontal) -offsetX else -offsetY) / scale).coerceAtLeast(0f)
+        val visibleTo = (((if (horizontal) -offsetX + viewW else -offsetY + viewH)) / scale).coerceAtMost(totalAlong.toFloat())
+        val needed = remember(visibleFrom.toInt() / 256, visibleTo.toInt() / 256, sampleLog, files) {
             val list = mutableListOf<Long>()
             for (p in decoders.indices) {
-                val partTop = partTops[p]
-                val partBottom = partTop + decoders[p].height
-                if (partBottom < visibleTop || partTop > visibleBottom) continue
-                val firstTile = ((max(visibleTop, partTop.toFloat()) - partTop) / TILE_HEIGHT).toInt().coerceAtLeast(0)
-                val lastTile = ((min(visibleBottom, partBottom.toFloat()) - partTop) / TILE_HEIGHT).toInt()
+                val partStart = partStarts[p]
+                val partEnd = partStart + along(decoders[p])
+                if (partEnd < visibleFrom || partStart > visibleTo) continue
+                val firstTile = ((max(visibleFrom, partStart.toFloat()) - partStart) / TILE_LENGTH).toInt().coerceAtLeast(0)
+                val lastTile = ((min(visibleTo, partEnd.toFloat()) - partStart) / TILE_LENGTH).toInt()
                 for (t in firstTile..lastTile) {
-                    if (t * TILE_HEIGHT < decoders[p].height) list += tileKey(p, t, sampleLog)
+                    if (t * TILE_LENGTH < along(decoders[p])) list += tileKey(p, t, sampleLog)
                 }
             }
             list
@@ -393,10 +542,11 @@ private fun LongPictureViewer(files: List<File>, modifier: Modifier = Modifier) 
                 val (p, t, s) = splitKey(key)
                 val image = withContext(Dispatchers.IO) {
                     val decoder = decoders[p]
-                    val top = t * TILE_HEIGHT
-                    val bottom = min(decoder.height, top + TILE_HEIGHT)
+                    val from = t * TILE_LENGTH
+                    val to = min(along(decoder), from + TILE_LENGTH)
+                    val region = if (horizontal) Rect(from, 0, to, decoder.height) else Rect(0, from, decoder.width, to)
                     val options = BitmapFactory.Options().apply { inSampleSize = 1 shl s }
-                    synchronized(decoder) { decoder.decodeRegion(Rect(0, top, decoder.width, bottom), options) }?.asImageBitmap()
+                    synchronized(decoder) { decoder.decodeRegion(region, options) }?.asImageBitmap()
                 } ?: continue
                 tiles[key] = image
                 order.addLast(key)
@@ -438,9 +588,14 @@ private fun LongPictureViewer(files: List<File>, modifier: Modifier = Modifier) 
                         // A flick keeps the picture sliding for a moment, like a normal list.
                         if (!several) {
                             val velocity = tracker.calculateVelocity()
-                            if (kotlin.math.abs(velocity.y) > 300f) {
+                            val speed = if (horizontal) velocity.x else velocity.y
+                            if (kotlin.math.abs(speed) > 300f) {
                                 flingJob = scope.launch {
-                                    Animatable(offsetY).animateDecay(velocity.y, exponentialDecay()) { offsetY = clampY(value, scale) }
+                                    if (horizontal) {
+                                        Animatable(offsetX).animateDecay(speed, exponentialDecay()) { offsetX = clampX(value, scale) }
+                                    } else {
+                                        Animatable(offsetY).animateDecay(speed, exponentialDecay()) { offsetY = clampY(value, scale) }
+                                    }
                                 }
                             }
                         }
@@ -449,28 +604,39 @@ private fun LongPictureViewer(files: List<File>, modifier: Modifier = Modifier) 
         ) {
             val s = scale
             for (p in decoders.indices) {
-                val partTop = partTops[p]
+                val partStart = partStarts[p]
                 // The line between two pictures.
                 if (p > 0) {
-                    val y = offsetY + (partTop - DIVIDER_HEIGHT) * s
-                    drawRect(Color(0xFFC62828), topLeft = Offset(0f, y), size = androidx.compose.ui.geometry.Size(size.width, DIVIDER_HEIGHT * s))
+                    val lineStart = (partStart - DIVIDER_LENGTH) * s
+                    if (horizontal) {
+                        drawRect(Color(0xFFC62828), topLeft = Offset(offsetX + lineStart, offsetY), size = androidx.compose.ui.geometry.Size(DIVIDER_LENGTH * s, across * s))
+                    } else {
+                        drawRect(Color(0xFFC62828), topLeft = Offset(offsetX, offsetY + lineStart), size = androidx.compose.ui.geometry.Size(across * s, DIVIDER_LENGTH * s))
+                    }
                 }
-                val tileCount = (decoders[p].height + TILE_HEIGHT - 1) / TILE_HEIGHT
+                val partLength = along(decoders[p])
+                val tileCount = (partLength + TILE_LENGTH - 1) / TILE_LENGTH
                 for (t in 0 until tileCount) {
-                    val top = offsetY + (partTop + t * TILE_HEIGHT) * s
-                    val height = min(TILE_HEIGHT, decoders[p].height - t * TILE_HEIGHT) * s
-                    if (top > size.height || top + height < 0f) continue
+                    val start = (partStart + t * TILE_LENGTH) * s
+                    val length = min(TILE_LENGTH, partLength - t * TILE_LENGTH) * s
+                    val screenStart = (if (horizontal) offsetX else offsetY) + start
+                    val screenEnd = screenStart + length
+                    if (screenStart > (if (horizontal) size.width else size.height) || screenEnd < 0f) continue
                     // The wanted detail, or any detail already loaded for this piece (so nothing flashes empty).
                     val image = (sampleLog..3).firstNotNullOfOrNull { tiles[tileKey(p, t, it)] }
                         ?: (0 until sampleLog).firstNotNullOfOrNull { tiles[tileKey(p, t, it)] }
+                    val tileX = if (horizontal) offsetX + start else offsetX
+                    val tileY = if (horizontal) offsetY else offsetY + start
+                    val tileW = if (horizontal) length else across * s
+                    val tileH = if (horizontal) across * s else length
                     if (image != null) {
                         drawImage(
                             image,
-                            dstOffset = IntOffset(offsetX.toInt(), top.toInt()),
-                            dstSize = IntSize((imageWidth * s).toInt() + 1, height.toInt() + 1)
+                            dstOffset = IntOffset(tileX.toInt(), tileY.toInt()),
+                            dstSize = IntSize(tileW.toInt() + 1, tileH.toInt() + 1)
                         )
                     } else {
-                        drawRect(Color(0xFF555555), topLeft = Offset(offsetX, top), size = androidx.compose.ui.geometry.Size(imageWidth * s, height))
+                        drawRect(Color(0xFF555555), topLeft = Offset(tileX, tileY), size = androidx.compose.ui.geometry.Size(tileW, tileH))
                     }
                 }
             }
@@ -478,7 +644,7 @@ private fun LongPictureViewer(files: List<File>, modifier: Modifier = Modifier) 
 
         // Zoom buttons (pinching does the same).
         Row(
-            modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp).background(Color(0xCCFFFFFF), androidx.compose.foundation.shape.RoundedCornerShape(24.dp)),
+            modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp).background(Color(0xCCFFFFFF), RoundedCornerShape(24.dp)),
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(onClick = { zoomAt(Offset(viewW / 2f, viewH / 2f), 1f / 1.5f) }, modifier = Modifier.size(40.dp)) {
