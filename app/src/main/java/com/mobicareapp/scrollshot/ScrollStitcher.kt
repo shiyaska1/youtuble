@@ -9,7 +9,6 @@ import android.graphics.Rect
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import com.arthenica.ffmpegkit.FFmpegKit
-import com.arthenica.ffmpegkit.FFmpegKitConfig
 import com.arthenica.ffmpegkit.ReturnCode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -44,7 +43,12 @@ object ScrollStitcher {
     private const val MAX_ANALYSIS_FRAMES = 3000
 
     suspend fun stitch(context: Context, video: Uri, onStatus: (String) -> Unit): Result<Stitched> = withContext(Dispatchers.IO) {
-        runCatching { stitchBlocking(context, video, onStatus) }
+        try {
+            runCatching { stitchBlocking(context, video, onStatus) }
+        } finally {
+            // The copy of the video and the small frames are not kept, whatever happened.
+            File(context.cacheDir, "scrollshot").deleteRecursively()
+        }
     }
 
     private fun stitchBlocking(context: Context, video: Uri, onStatus: (String) -> Unit): Stitched {
@@ -66,11 +70,12 @@ object ScrollStitcher {
         }
 
         val work = File(context.cacheDir, "scrollshot").apply { deleteRecursively(); mkdirs() }
-        val input = FFmpegKitConfig.getSafParameterForRead(context, video) ?: run {
-            val copy = File(work, "input.mp4")
-            context.contentResolver.openInputStream(video)?.use { src -> copy.outputStream().use { src.copyTo(it) } } ?: error("Couldn't read the video")
-            copy.absolutePath
-        }
+        // The video is copied to the app's own storage first: reading it straight from the gallery
+        // does not allow jumping around in the file, and many phone videos keep their index at the end.
+        onStatus("Copying the video…")
+        val copy = File(work, "input.mp4")
+        context.contentResolver.openInputStream(video)?.use { src -> copy.outputStream().use { src.copyTo(it) } } ?: error("Couldn't read the video")
+        val input = copy.absolutePath
 
         // --- 1. small grey frames, 25 a second at most (fewer for a very long video) ---
         val fps = (MAX_ANALYSIS_FRAMES / max(durationSec, 1.0)).coerceIn(5.0, 25.0)
